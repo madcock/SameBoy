@@ -52,10 +52,10 @@ ifeq ($(platform), win)
 	INCFLAGS += -I Windows
 endif
 
-CORE_DIR     = ../
+CORE_DIR     = ..
 
 TARGET_NAME  = sameboy
-LIBM		    = -lm
+LIBM         = -lm
 
 
 ifneq ($(SANITIZER),)
