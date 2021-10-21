@@ -434,6 +434,7 @@ struct GB_gameboy_internal_s {
                
        int32_t ir_sensor;
        bool effective_ir_input;
+       uint16_t address_bus;
     );
 
     /* DMA and HDMA */
@@ -892,5 +893,9 @@ unsigned GB_get_player_count(GB_gameboy_t *gb);
 // `title` must be at least 17 bytes in size
 void GB_get_rom_title(GB_gameboy_t *gb, char *title);
 uint32_t GB_get_rom_crc32(GB_gameboy_t *gb);
+
+#ifdef GB_INTERNAL
+void GB_borrow_sgb_border(GB_gameboy_t *gb);
+#endif
     
 #endif /* GB_h */
