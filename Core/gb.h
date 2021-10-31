@@ -127,14 +127,14 @@ typedef enum {
     GB_MODEL_SGB_NTSC_NO_SFC = GB_MODEL_SGB | GB_MODEL_NO_SFC_BIT,
     GB_MODEL_SGB_NO_SFC = GB_MODEL_SGB_NTSC_NO_SFC,
     GB_MODEL_SGB_PAL_NO_SFC = GB_MODEL_SGB | GB_MODEL_NO_SFC_BIT | GB_MODEL_PAL_BIT,
-    // GB_MODEL_MGB = 0x100,
+    GB_MODEL_MGB = 0x100,
     GB_MODEL_SGB2 = 0x101,
     GB_MODEL_SGB2_NO_SFC = GB_MODEL_SGB2 | GB_MODEL_NO_SFC_BIT,
     // GB_MODEL_CGB_0 = 0x200,
     // GB_MODEL_CGB_A = 0x201,
     // GB_MODEL_CGB_B = 0x202,
     GB_MODEL_CGB_C = 0x203,
-    // GB_MODEL_CGB_D = 0x204,
+    GB_MODEL_CGB_D = 0x204,
     GB_MODEL_CGB_E = 0x205,
     GB_MODEL_AGB = 0x206,
 } GB_model_t;
@@ -434,6 +434,7 @@ struct GB_gameboy_internal_s {
                
        int32_t ir_sensor;
        bool effective_ir_input;
+       uint16_t address_bus;
     );
 
     /* DMA and HDMA */
@@ -581,7 +582,7 @@ struct GB_gameboy_internal_s {
         uint8_t current_line;
         uint16_t ly_for_comparison;
         GB_fifo_t bg_fifo, oam_fifo;
-        uint8_t fetcher_x;
+        GB_PADDING(uint8_t, fetcher_x);
         uint8_t fetcher_y;
         uint16_t cycles_for_line;
         uint8_t current_tile;
@@ -892,5 +893,9 @@ unsigned GB_get_player_count(GB_gameboy_t *gb);
 // `title` must be at least 17 bytes in size
 void GB_get_rom_title(GB_gameboy_t *gb, char *title);
 uint32_t GB_get_rom_crc32(GB_gameboy_t *gb);
+
+#ifdef GB_INTERNAL
+void GB_borrow_sgb_border(GB_gameboy_t *gb);
+#endif
     
 #endif /* GB_h */

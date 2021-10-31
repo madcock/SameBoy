@@ -125,6 +125,17 @@ static void load_default_border(GB_gameboy_t *gb)
         #include "graphics/agb_border.inc"
         LOAD_BORDER();
     }
+    else if (gb->model == GB_MODEL_MGB) {
+        #include "graphics/mgb_border.inc"
+        LOAD_BORDER();
+        if (gb->dmg_palette &&
+            gb->dmg_palette->colors[4].b > gb->dmg_palette->colors[4].r) {
+            for (unsigned i = 0; i < 7; i++) {
+                gb->borrowed_border.map[13 + 24 * 32 + i] = i + 1;
+                gb->borrowed_border.map[13 + 25 * 32 + i] = i + 8;
+            }
+        }
+    }
     else if (GB_is_cgb(gb)) {
         #include "graphics/cgb_border.inc"
         LOAD_BORDER();
@@ -284,7 +295,7 @@ int GB_load_rom(GB_gameboy_t *gb, const char *path)
         gb->rom_size |= gb->rom_size >> 1;
         gb->rom_size++;
     }
-    if (gb->rom_size == 0) {
+    if (gb->rom_size < 0x8000) {
         gb->rom_size = 0x8000;
     }
     fseek(f, 0, SEEK_SET);
@@ -396,7 +407,7 @@ int GB_load_gbs_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t size
         gb->rom_size++;
     }
     
-    if (gb->rom_size == 0) {
+    if (gb->rom_size < 0x8000) {
         gb->rom_size = 0x8000;
     }
 
@@ -412,6 +423,7 @@ int GB_load_gbs_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t size
     if (gb->mbc_ram) {
         free(gb->mbc_ram);
         gb->mbc_ram = NULL;
+        gb->mbc_ram_size = 0;
     }
     
     if (gb->cartridge_type->has_ram) {
@@ -1198,7 +1210,7 @@ uint8_t GB_run(GB_gameboy_t *gb)
 {
     gb->vblank_just_occured = false;
 
-    if (gb->sgb && gb->sgb->intro_animation < 140) {
+    if (gb->sgb && gb->sgb->intro_animation < 96) {
         /* On the SGB, the GB is halted after finishing the boot ROM.
            Then, after the boot animation is almost done, it's reset.
            Since the SGB HLE does not perform any header validity checks,
@@ -1419,6 +1431,7 @@ void GB_set_user_data(GB_gameboy_t *gb, void *data)
 static void reset_ram(GB_gameboy_t *gb)
 {
     switch (gb->model) {
+        case GB_MODEL_MGB:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB: /* Unverified */
             for (unsigned i = 0; i < gb->ram_size; i++) {
@@ -1460,12 +1473,23 @@ static void reset_ram(GB_gameboy_t *gb)
                 }
             }
             break;
+        case GB_MODEL_CGB_D:
+             for (unsigned i = 0; i < gb->ram_size; i++) {
+                gb->ram[i] = GB_random();
+                if (i & 0x800) {
+                    gb->ram[i] &= GB_random();
+                }
+                else {
+                    gb->ram[i] |= GB_random();
+                }
+            }
+            break;
     }
     
     /* HRAM */
     switch (gb->model) {
         case GB_MODEL_CGB_C:
-        // case GB_MODEL_CGB_D:
+        case GB_MODEL_CGB_D:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB:
             for (unsigned i = 0; i < sizeof(gb->hram); i++) {
@@ -1474,6 +1498,7 @@ static void reset_ram(GB_gameboy_t *gb)
             break;
             
         case GB_MODEL_DMG_B:
+        case GB_MODEL_MGB:
         case GB_MODEL_SGB_NTSC: /* Unverified*/
         case GB_MODEL_SGB_PAL: /* Unverified */
         case GB_MODEL_SGB_NTSC_NO_SFC: /* Unverified */
@@ -1494,12 +1519,14 @@ static void reset_ram(GB_gameboy_t *gb)
     /* OAM */
     switch (gb->model) {
         case GB_MODEL_CGB_C:
+        case GB_MODEL_CGB_D:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB:
             /* Zero'd out by boot ROM anyway*/
             break;
             
         case GB_MODEL_DMG_B:
+        case GB_MODEL_MGB:
         case GB_MODEL_SGB_NTSC: /* Unverified */
         case GB_MODEL_SGB_PAL: /* Unverified */
         case GB_MODEL_SGB_NTSC_NO_SFC: /* Unverified */
@@ -1523,11 +1550,22 @@ static void reset_ram(GB_gameboy_t *gb)
     /* Wave RAM */
     switch (gb->model) {
         case GB_MODEL_CGB_C:
+        case GB_MODEL_CGB_D:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB:
             /* Initialized by CGB-A and newer, 0s in CGB-0*/
             break;
-            
+        case GB_MODEL_MGB: {
+            for (unsigned i = 0; i < GB_IO_WAV_END - GB_IO_WAV_START; i++) {
+                if (i & 1) {
+                    gb->io_registers[GB_IO_WAV_START + i] = GB_random() & GB_random();
+                }
+                else {
+                    gb->io_registers[GB_IO_WAV_START + i] = GB_random() | GB_random();
+                }
+            }
+            break;
+        }
         case GB_MODEL_DMG_B:
         case GB_MODEL_SGB_NTSC: /* Unverified*/
         case GB_MODEL_SGB_PAL: /* Unverified */
@@ -1535,18 +1573,13 @@ static void reset_ram(GB_gameboy_t *gb)
         case GB_MODEL_SGB_PAL_NO_SFC: /* Unverified */
         case GB_MODEL_SGB2:
         case GB_MODEL_SGB2_NO_SFC: {
-            uint8_t temp;
             for (unsigned i = 0; i < GB_IO_WAV_END - GB_IO_WAV_START; i++) {
                 if (i & 1) {
-                    temp = GB_random() & GB_random() & GB_random();
+                    gb->io_registers[GB_IO_WAV_START + i] = GB_random() & GB_random() & GB_random();
                 }
                 else {
-                    temp = GB_random() | GB_random() | GB_random();
+                    gb->io_registers[GB_IO_WAV_START + i] = GB_random() | GB_random() | GB_random();
                 }
-                gb->apu.wave_channel.wave_form[i * 2]     = temp >> 4;
-                gb->apu.wave_channel.wave_form[i * 2 + 1] = temp & 0xF;
-                gb->io_registers[GB_IO_WAV_START + i] = temp;
-
             }
             break;
         }
@@ -1576,6 +1609,9 @@ static void request_boot_rom(GB_gameboy_t *gb)
             case GB_MODEL_DMG_B:
                 type = GB_BOOT_ROM_DMG;
                 break;
+            case GB_MODEL_MGB:
+                type = GB_BOOT_ROM_MGB;
+                break;
             case GB_MODEL_SGB_NTSC:
             case GB_MODEL_SGB_PAL:
             case GB_MODEL_SGB_NTSC_NO_SFC:
@@ -1587,6 +1623,7 @@ static void request_boot_rom(GB_gameboy_t *gb)
                 type = GB_BOOT_ROM_SGB2;
                 break;
             case GB_MODEL_CGB_C:
+            case GB_MODEL_CGB_D:
             case GB_MODEL_CGB_E:
                 type = GB_BOOT_ROM_CGB;
                 break;
@@ -1602,7 +1639,10 @@ void GB_reset(GB_gameboy_t *gb)
 {
     uint32_t mbc_ram_size = gb->mbc_ram_size;
     GB_model_t model = gb->model;
+    uint8_t rtc_section[GB_SECTION_SIZE(rtc)];
+    memcpy(rtc_section, GB_GET_SECTION(gb, rtc), sizeof(rtc_section));
     memset(gb, 0, (size_t)GB_GET_SECTION((GB_gameboy_t *) 0, unsaved));
+    memcpy(GB_GET_SECTION(gb, rtc), rtc_section, sizeof(rtc_section));
     gb->model = model;
     gb->version = GB_STRUCT_VERSION;
     

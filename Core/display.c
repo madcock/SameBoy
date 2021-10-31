@@ -483,18 +483,29 @@ static void add_object_from_index(GB_gameboy_t *gb, unsigned index)
     }
 }
 
-static uint8_t data_for_tile_sel_glitch(GB_gameboy_t *gb, bool *should_use)
+static uint8_t data_for_tile_sel_glitch(GB_gameboy_t *gb, bool *should_use, bool *cgb_d_glitch)
 {
     /*
      Based on Matt Currie's research here:
      https://github.com/mattcurrie/mealybug-tearoom-tests/blob/master/the-comprehensive-game-boy-ppu-documentation.md#tile_sel-bit-4
     */
-        
     *should_use = true;
+    *cgb_d_glitch = false;
+    
     if (gb->io_registers[GB_IO_LCDC] & 0x10) {
-        *should_use = !(gb->current_tile & 0x80);
-        /* if (gb->model != GB_MODEL_CGB_D) */ return gb->current_tile;
-        // TODO: CGB D behaves differently
+        if (gb->model != GB_MODEL_CGB_D) {
+            *should_use = !(gb->current_tile & 0x80);
+            return gb->current_tile;
+        }
+        *cgb_d_glitch = true;
+        *should_use = false;
+        gb->io_registers[GB_IO_LCDC] &= ~0x10;
+        if (gb->fetcher_state == 3) {
+            *should_use = false;
+            *cgb_d_glitch = true;
+            return 0;
+        }
+        return 0;
     }
     return gb->data_for_sel_glitch;
 }
@@ -632,7 +643,7 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
         GB_FETCHER_SLEEP,
     } fetcher_step_t;
     
-    fetcher_step_t fetcher_state_machine [8] = {
+    static const fetcher_step_t fetcher_state_machine [8] = {
         GB_FETCHER_SLEEP,
         GB_FETCHER_GET_TILE,
         GB_FETCHER_SLEEP,
@@ -666,7 +677,10 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
                 x = gb->window_tile_x;
             }
             else {
-                x = ((gb->io_registers[GB_IO_SCX] / 8) + gb->fetcher_x) & 0x1F;
+                /* TODO: There is some CGB timing error around here.
+                   Adjusting SCX by 7 or less shouldn't have an effect on a CGB,
+                   but SameBoy is affected by a change of both 7 and 6 (but not less). */
+                x = ((gb->io_registers[GB_IO_SCX] + gb->position_in_line + 8) / 8) & 0x1F;
             }
             if (gb->model > GB_MODEL_CGB_C) {
                 /* This value is cached on the CGB-D and newer, so it cannot be used to mix tiles together */
@@ -691,8 +705,9 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
             
         case GB_FETCHER_GET_TILE_DATA_LOWER: {
             bool use_glitched = false;
+            bool cgb_d_glitch = false;
             if (gb->tile_sel_glitch) {
-                gb->current_tile_data[0] = data_for_tile_sel_glitch(gb, &use_glitched);
+                gb->current_tile_data[0] = data_for_tile_sel_glitch(gb, &use_glitched, &cgb_d_glitch);
             }
             uint8_t y_flip = 0;
             uint16_t tile_address = 0;
@@ -718,9 +733,15 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
                     gb->current_tile_data[0] = 0xFF;
                 }
             }
-            else {
+            if ((gb->io_registers[GB_IO_LCDC] & 0x10) && gb->tile_sel_glitch) {
                 gb->data_for_sel_glitch =
                 gb->vram[tile_address + ((y & 7) ^ y_flip) * 2];
+                if (gb->vram_ppu_blocked) {
+                    gb->data_for_sel_glitch = 0xFF;
+                }
+            }
+            else if (cgb_d_glitch) {
+                gb->data_for_sel_glitch = gb->vram[gb->current_tile * 0x10 + ((y & 7) ^ y_flip) * 2];
                 if (gb->vram_ppu_blocked) {
                     gb->data_for_sel_glitch = 0xFF;
                 }
@@ -733,8 +754,9 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
             /* Todo: Verified for DMG (Tested: SGB2), CGB timing is wrong. */
             
             bool use_glitched = false;
+            bool cgb_d_glitch = false;
             if (gb->tile_sel_glitch) {
-                gb->current_tile_data[1] = data_for_tile_sel_glitch(gb, &use_glitched);
+                gb->current_tile_data[1] = data_for_tile_sel_glitch(gb, &use_glitched, &cgb_d_glitch);
             }
 
             uint16_t tile_address = 0;
@@ -753,7 +775,7 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
             if (gb->current_tile_attributes & 0x40) {
                 y_flip = 0x7;
             }
-            gb->last_tile_data_address = tile_address +  ((y & 7) ^ y_flip) * 2 + 1;
+            gb->last_tile_data_address = tile_address +  ((y & 7) ^ y_flip) * 2 + 1 - cgb_d_glitch;
             if (!use_glitched) {
                 gb->current_tile_data[1] =
                     gb->vram[gb->last_tile_data_address];
@@ -761,12 +783,16 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
                     gb->current_tile_data[1] = 0xFF;
                 }
             }
-            else {
-                if ((gb->io_registers[GB_IO_LCDC] & 0x10) && gb->tile_sel_glitch) {
-                    gb->data_for_sel_glitch = gb->vram[gb->last_tile_data_address];
-                    if (gb->vram_ppu_blocked) {
-                        gb->data_for_sel_glitch = 0xFF;
-                    }
+            if ((gb->io_registers[GB_IO_LCDC] & 0x10) && gb->tile_sel_glitch) {
+                gb->data_for_sel_glitch = gb->vram[gb->last_tile_data_address];
+                if (gb->vram_ppu_blocked) {
+                    gb->data_for_sel_glitch = 0xFF;
+                }
+            }
+            else if (cgb_d_glitch) {
+                gb->data_for_sel_glitch = gb->vram[gb->current_tile * 0x10 + ((y & 7) ^ y_flip) * 2 + 1];
+                if (gb->vram_ppu_blocked) {
+                    gb->data_for_sel_glitch = 0xFF;
                 }
             }
         }
@@ -777,12 +803,6 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
             
         // fallthrough
         case GB_FETCHER_PUSH: {
-            if (gb->fetcher_state == 6) {
-                /* The background map index increase at this specific point. If this state is not reached,
-                   it will simply not increase. */
-                gb->fetcher_x++;
-                gb->fetcher_x &= 0x1f;
-            }
             if (gb->fetcher_state < 7) {
                 gb->fetcher_state++;
             }
@@ -1049,7 +1069,6 @@ void GB_display_run(GB_gameboy_t *gb, uint8_t cycles)
             gb->position_in_line = - (gb->io_registers[GB_IO_SCX] & 7) - 8;
             gb->lcd_x = 0;
           
-            gb->fetcher_x = 0;
             gb->extra_penalty_for_sprite_at_0 = (gb->io_registers[GB_IO_SCX] & 7);
 
             
@@ -1530,7 +1549,7 @@ uint8_t GB_get_oam_info(GB_gameboy_t *gb, GB_oam_info_t *dest, uint8_t *sprite_h
     uint8_t count = 0;
     *sprite_height = (gb->io_registers[GB_IO_LCDC] & 4) ? 16:8;
     uint8_t oam_to_dest_index[40] = {0,};
-    for (unsigned y = 0; y < LINES; y++) {
+    for (signed y = 0; y < LINES; y++) {
         GB_object_t *sprite = (GB_object_t *) &gb->oam;
         uint8_t sprites_in_line = 0;
         for (uint8_t i = 0; i < 40; i++, sprite++) {

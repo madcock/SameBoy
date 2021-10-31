@@ -9,6 +9,15 @@
 #define BESS_NAME "SameBoy v" GB_VERSION
 #endif
 
+_Static_assert((GB_SECTION_OFFSET(core_state) & 7) == 0, "Section core_state is not aligned");
+_Static_assert((GB_SECTION_OFFSET(dma) & 7) == 0, "Section dma is not aligned");
+_Static_assert((GB_SECTION_OFFSET(mbc) & 7) == 0, "Section mbc is not aligned");
+_Static_assert((GB_SECTION_OFFSET(hram) & 7) == 0, "Section hram is not aligned");
+_Static_assert((GB_SECTION_OFFSET(timing) & 7) == 0, "Section timing is not aligned");
+_Static_assert((GB_SECTION_OFFSET(apu) & 7) == 0, "Section apu is not aligned");
+_Static_assert((GB_SECTION_OFFSET(rtc) & 7) == 0, "Section rtc is not aligned");
+_Static_assert((GB_SECTION_OFFSET(video) & 7) == 0, "Section video is not aligned");
+
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t size;
@@ -339,13 +348,18 @@ static void sanitize_state(GB_gameboy_t *gb)
     gb->oam_fifo.read_end &= 0xF;
     gb->oam_fifo.write_end &= 0xF;
     gb->object_low_line_address &= gb->vram_size & ~1;
-    gb->fetcher_x &= 0x1f;
     if (gb->lcd_x > gb->position_in_line) {
         gb->lcd_x = gb->position_in_line;
     }
     
     if (gb->object_priority == GB_OBJECT_PRIORITY_UNDEFINED) {
         gb->object_priority = gb->cgb_mode? GB_OBJECT_PRIORITY_INDEX : GB_OBJECT_PRIORITY_X;
+    }
+    if (gb->sgb) {
+        if (gb->sgb->player_count != 1 && gb->sgb->player_count != 2 && gb->sgb->player_count != 4) {
+            gb->sgb->player_count = 1;
+        }
+        gb->sgb->current_player &= gb->sgb->player_count - 1;
     }
     if (gb->sgb && !gb->sgb->v14_3) {
 #ifdef GB_BIG_ENDIAN
@@ -566,6 +580,7 @@ static int save_state_internal(GB_gameboy_t *gb, virtual_file_t *file, bool appe
     switch (gb->model) {
 
         case GB_MODEL_DMG_B: bess_core.full_model = BE32('GDB '); break;
+        case GB_MODEL_MGB: bess_core.full_model = BE32('GM  '); break;
             
         case GB_MODEL_SGB_NTSC:
         case GB_MODEL_SGB_NTSC_NO_SFC:
@@ -581,6 +596,7 @@ static int save_state_internal(GB_gameboy_t *gb, virtual_file_t *file, bool appe
  
  
         case GB_MODEL_CGB_C: bess_core.full_model = BE32('CCC '); break;
+        case GB_MODEL_CGB_D: bess_core.full_model = BE32('CCD '); break;
         case GB_MODEL_CGB_E: bess_core.full_model = BE32('CCE '); break;
         case GB_MODEL_AGB: bess_core.full_model = BE32('CA  '); break; // SameBoy doesn't emulate a specific AGB revision yet
     }
@@ -711,7 +727,7 @@ static int save_state_internal(GB_gameboy_t *gb, virtual_file_t *file, bool appe
             bess_sgb.attribute_files = (BESS_buffer_t){LE32(sizeof(gb->sgb->attribute_files)),
                                                        LE32(sgb_offset + offsetof(GB_sgb_t, attribute_files))};
             
-            bess_sgb.multiplayer_state = (gb->sgb->player_count << 4) | (gb->sgb->current_player & (gb->sgb->player_count - 1));
+            bess_sgb.multiplayer_state = (gb->sgb->player_count << 4) | gb->sgb->current_player;
             if (file->write(file, &bess_sgb, sizeof(bess_sgb)) != sizeof(bess_sgb)) {
                 goto error;
             }

@@ -388,7 +388,7 @@ static void cycle_model_backwards(unsigned index)
 
 const char *current_model_string(unsigned index)
 {
-    return (const char *[]){"Game Boy", "Game Boy Color", "Game Boy Advance", "Super Game Boy"}
+    return (const char *[]){"Game Boy", "Game Boy Color", "Game Boy Advance", "Super Game Boy", "Game Boy Pocket"}
         [configuration.model];
 }
 
@@ -1160,6 +1160,12 @@ void run_gui(bool is_running)
     static SDL_Surface *converted_background = NULL;
     if (!converted_background) {
         SDL_Surface *background = SDL_LoadBMP(resource_path("background.bmp"));
+        
+        /* Create a blank background if background.bmp could not be loaded */
+        if (!background) {
+            background = SDL_CreateRGBSurface(0, 160, 144, 8, 0, 0, 0, 0);
+        }
+        
         SDL_SetPaletteColors(background->format->palette, gui_palette, 0, 4);
         converted_background = SDL_ConvertSurface(background, pixel_format, 0);
         SDL_LockSurface(converted_background);
