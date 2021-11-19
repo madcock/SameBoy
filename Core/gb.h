@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "gb_struct_def.h"
+#include "defs.h"
 #include "save_state.h"
 
 #include "apu.h"
@@ -26,7 +26,7 @@
 #include "workboy.h"
 #include "random.h"
 
-#define GB_STRUCT_VERSION 13
+#define GB_STRUCT_VERSION 14
 
 #define GB_MODEL_FAMILY_MASK 0xF00
 #define GB_MODEL_DMG_FAMILY 0x000
@@ -34,20 +34,6 @@
 #define GB_MODEL_CGB_FAMILY 0x200
 #define GB_MODEL_PAL_BIT 0x40
 #define GB_MODEL_NO_SFC_BIT 0x80
-
-#define GB_MODEL_PAL_BIT_OLD 0x1000
-#define GB_MODEL_NO_SFC_BIT_OLD 0x2000
-
-#ifdef GB_INTERNAL
-#if __clang__
-#define unrolled _Pragma("unroll")
-#elif __GNUC__ >= 8
-#define unrolled _Pragma("GCC unroll 8")
-#else
-#define unrolled
-#endif
-
-#endif
 
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define GB_BIG_ENDIAN
@@ -57,31 +43,9 @@
 #error Unable to detect endianess
 #endif
 
-#ifdef GB_INTERNAL
-/* Todo: similar macros are everywhere, clean this up and remove direct calls to bswap */
-#ifdef GB_BIG_ENDIAN
-#define LE16(x) __builtin_bswap16(x)
-#define LE32(x) __builtin_bswap32(x)
-#define LE64(x) __builtin_bswap64(x)
-#define BE16(x) (x)
-#define BE32(x) (x)
-#define BE64(x) (x)
-#else
-#define LE16(x) (x)
-#define LE32(x) (x)
-#define LE64(x) (x)
-#define BE16(x) __builtin_bswap16(x)
-#define BE32(x) __builtin_bswap32(x)
-#define BE64(x) __builtin_bswap64(x)
-#endif
-#endif
-
-#if __GNUC__ < 4 || (__GNUC__ == 4 && __GNUC_MINOR__ < 8)
-#define __builtin_bswap16(x) ({ typeof(x) _x = (x); _x >> 8 | _x << 8; })
-#endif
 
 typedef struct {
-    struct {
+    struct GB_color_s {
         uint8_t r, g, b;
     } colors[5];
 } GB_palette_t;
@@ -131,7 +95,7 @@ typedef enum {
     GB_MODEL_MGB = 0x100,
     GB_MODEL_SGB2 = 0x101,
     GB_MODEL_SGB2_NO_SFC = GB_MODEL_SGB2 | GB_MODEL_NO_SFC_BIT,
-    // GB_MODEL_CGB_0 = 0x200,
+    GB_MODEL_CGB_0 = 0x200,
     // GB_MODEL_CGB_A = 0x201,
     GB_MODEL_CGB_B = 0x202,
     GB_MODEL_CGB_C = 0x203,
@@ -224,10 +188,7 @@ enum {
     GB_IO_OBP1       = 0x49, // Object Palette 1 Data (R/W) - Non CGB Mode Only
     GB_IO_WY         = 0x4a, // Window Y Position (R/W)
     GB_IO_WX         = 0x4b, // Window X Position minus 7 (R/W)
-    // Has some undocumented compatibility flags written at boot.
-    // Unfortunately it is not readable or writable after boot has finished, so research of this
-    // register is quite limited. The value written to this register, however, can be controlled
-    // in some cases.
+    // Controls DMG mode and PGB mode
     GB_IO_KEY0 = 0x4c,
 
     /* General CGB features */
@@ -260,13 +221,12 @@ enum {
     /* Missing */
 
     GB_IO_SVBK       = 0x70, // CGB Mode Only - WRAM Bank
-    GB_IO_UNKNOWN2   = 0x72, // (00h) - Bit 0-7 (Read/Write)
-    GB_IO_UNKNOWN3   = 0x73, // (00h) - Bit 0-7 (Read/Write)
-    GB_IO_UNKNOWN4   = 0x74, // (00h) - Bit 0-7 (Read/Write) - CGB Mode Only
+    GB_IO_PSWX       = 0x72, // X position of the palette switching window
+    GB_IO_PSWY       = 0x73, // Y position of the palette switching window
+    GB_IO_PSW        = 0x74, // Key combo to trigger the palette switching window
     GB_IO_UNKNOWN5   = 0x75, // (8Fh) - Bit 4-6 (Read/Write)
-    GB_IO_PCM_12     = 0x76, // Channels 1 and 2 amplitudes
-    GB_IO_PCM_34     = 0x77, // Channels 3 and 4 amplitudes
-    GB_IO_UNKNOWN8   = 0x7F, // Unknown, write only
+    GB_IO_PCM12     = 0x76, // Channels 1 and 2 amplitudes
+    GB_IO_PCM34     = 0x77, // Channels 3 and 4 amplitudes
 };
 
 typedef enum {
@@ -277,12 +237,12 @@ typedef enum {
 } GB_log_attributes;
 
 typedef enum {
-    GB_BOOT_ROM_DMG0,
+    GB_BOOT_ROM_DMG_0,
     GB_BOOT_ROM_DMG,
     GB_BOOT_ROM_MGB,
     GB_BOOT_ROM_SGB,
     GB_BOOT_ROM_SGB2,
-    GB_BOOT_ROM_CGB0,
+    GB_BOOT_ROM_CGB_0,
     GB_BOOT_ROM_CGB,
     GB_BOOT_ROM_AGB,
 } GB_boot_rom_t;
@@ -475,6 +435,7 @@ struct GB_gameboy_internal_s {
             struct {
                 uint8_t rom_bank:8;
                 uint8_t ram_bank:3;
+                bool rtc_mapped:1;
             } mbc3;
 
             struct {
@@ -494,26 +455,27 @@ struct GB_gameboy_internal_s {
                 uint8_t rom_bank:7;
                 uint8_t padding:1;
                 uint8_t ram_bank:4;
+                uint8_t mode;
+                uint8_t access_index;
+                uint16_t minutes, days;
+                uint16_t alarm_minutes, alarm_days;
+                bool alarm_enabled;
+                uint8_t read;
+                uint8_t access_flags;
             } huc3;
+               
+           struct {
+               uint16_t rom_bank;
+               uint8_t ram_bank;
+               uint8_t mode;
+           } tpp1;
         };
         uint16_t mbc_rom0_bank; /* For some MBC1 wirings. */
         bool camera_registers_mapped;
         uint8_t camera_registers[0x36];
         uint8_t rumble_strength;
         bool cart_ir;
-        
-        // TODO: move to huc3/mbc3/tpp1 struct when breaking save compat
-        uint8_t huc3_mode;
-        uint8_t huc3_access_index;
-        uint16_t huc3_minutes, huc3_days;
-        uint16_t huc3_alarm_minutes, huc3_alarm_days;
-        bool huc3_alarm_enabled;
-        uint8_t huc3_read;
-        uint8_t huc3_access_flags;
-        bool mbc3_rtc_mapped;
-        uint16_t tpp1_rom_bank;
-        uint8_t tpp1_ram_bank;
-        uint8_t tpp1_mode;
+
     );
 
 
@@ -547,7 +509,6 @@ struct GB_gameboy_internal_s {
     GB_SECTION(rtc,
         GB_rtc_time_t rtc_real, rtc_latched;
         uint64_t last_rtc_second;
-        GB_PADDING(bool, rtc_latch);
         uint32_t rtc_cycles;
         uint8_t tpp1_mr4;
     );
@@ -583,7 +544,6 @@ struct GB_gameboy_internal_s {
         uint8_t current_line;
         uint16_t ly_for_comparison;
         GB_fifo_t bg_fifo, oam_fifo;
-        GB_PADDING(uint8_t, fetcher_x);
         uint8_t fetcher_y;
         uint16_t cycles_for_line;
         uint8_t current_tile;
@@ -896,7 +856,7 @@ void GB_get_rom_title(GB_gameboy_t *gb, char *title);
 uint32_t GB_get_rom_crc32(GB_gameboy_t *gb);
 
 #ifdef GB_INTERNAL
-void GB_borrow_sgb_border(GB_gameboy_t *gb);
+internal void GB_borrow_sgb_border(GB_gameboy_t *gb);
 #endif
     
 #endif /* GB_h */
