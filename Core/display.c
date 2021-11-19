@@ -107,7 +107,7 @@ typedef struct __attribute__((packed)) {
     uint8_t x;
     uint8_t tile;
     uint8_t flags;
-} GB_object_t;
+} object_t;
 
 static void display_vblank(GB_gameboy_t *gb)
 {  
@@ -164,6 +164,9 @@ static void display_vblank(GB_gameboy_t *gb)
                 0x1050, 0x3C84, 0x0E07, 0x0E18, 0x2964,
             };
             unsigned index = gb->rom? gb->rom[0x14e] % 5 : 0;
+            if (gb->model == GB_MODEL_CGB_0) {
+                index = 1; // CGB 0 was only available in Indigo!
+            }
             gb->borrowed_border.palette[0] = LE16(colors[index]);
             gb->borrowed_border.palette[10] = LE16(colors[5 + index]);
             gb->borrowed_border.palette[14] = LE16(colors[10 + index]);
@@ -467,7 +470,7 @@ static void add_object_from_index(GB_gameboy_t *gb, unsigned index)
     }
 
     /* This reverse sorts the visible objects by location and priority */
-    GB_object_t *objects = (GB_object_t *) &gb->oam;
+    object_t *objects = (object_t *) &gb->oam;
     bool height_16 = (gb->io_registers[GB_IO_LCDC] & 4) != 0;
     signed y = objects[index].y - 16;
     if (y <= gb->current_line && y + (height_16? 16 : 8) > gb->current_line) {
@@ -822,11 +825,11 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
     }
 }
 
-static uint16_t get_object_line_address(GB_gameboy_t *gb, const GB_object_t *object)
+static uint16_t get_object_line_address(GB_gameboy_t *gb, const object_t *object)
 {
     /* TODO: what does the PPU read if DMA is active? */
     if (gb->oam_ppu_blocked) {
-        static const GB_object_t blocked = {0xFF, 0xFF, 0xFF, 0xFF};
+        static const object_t blocked = {0xFF, 0xFF, 0xFF, 0xFF};
         object = &blocked;
     }
     
@@ -861,7 +864,7 @@ void GB_display_run(GB_gameboy_t *gb, uint8_t cycles)
         }
         return;
     }
-    GB_object_t *objects = (GB_object_t *) &gb->oam;
+    object_t *objects = (object_t *) &gb->oam;
     
     GB_STATE_MACHINE(gb, display, cycles, 2) {
         GB_STATE(gb, display, 1);
@@ -1205,7 +1208,7 @@ void GB_display_run(GB_gameboy_t *gb, uint8_t cycles)
                     gb->cycles_for_line++;
                     GB_SLEEP(gb, display, 40, 1);
 
-                    const GB_object_t *object = &objects[gb->visible_objs[gb->n_visible_objs - 1]];
+                    const object_t *object = &objects[gb->visible_objs[gb->n_visible_objs - 1]];
                     
                     uint16_t line_address = get_object_line_address(gb, object);
                     
@@ -1550,7 +1553,7 @@ uint8_t GB_get_oam_info(GB_gameboy_t *gb, GB_oam_info_t *dest, uint8_t *sprite_h
     *sprite_height = (gb->io_registers[GB_IO_LCDC] & 4) ? 16:8;
     uint8_t oam_to_dest_index[40] = {0,};
     for (signed y = 0; y < LINES; y++) {
-        GB_object_t *sprite = (GB_object_t *) &gb->oam;
+        object_t *sprite = (object_t *) &gb->oam;
         uint8_t sprites_in_line = 0;
         for (uint8_t i = 0; i < 40; i++, sprite++) {
             signed sprite_y = sprite->y - 16;

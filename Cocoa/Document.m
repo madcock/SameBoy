@@ -10,6 +10,9 @@
 #include "GBCheatWindowController.h"
 #include "GBTerminalTextFieldCell.h"
 #include "BigSurToolbar.h"
+#import "GBPaletteEditorController.h"
+
+#define GB_MODEL_PAL_BIT_OLD 0x1000
 
 /* Todo: The general Objective-C coding style conflicts with SameBoy's. This file needs a cleanup. */
 /* Todo: Split into category files! This is so messy!!! */
@@ -256,23 +259,7 @@ static void infraredStateChanged(GB_gameboy_t *gb, bool on)
 
 - (void) updatePalette
 {
-    switch ([[NSUserDefaults standardUserDefaults] integerForKey:@"GBColorPalette"]) {
-        case 1:
-            GB_set_palette(&gb, &GB_PALETTE_DMG);
-            break;
-            
-        case 2:
-            GB_set_palette(&gb, &GB_PALETTE_MGB);
-            break;
-            
-        case 3:
-            GB_set_palette(&gb, &GB_PALETTE_GBL);
-            break;
-            
-        default:
-            GB_set_palette(&gb, &GB_PALETTE_GREY);
-            break;
-    }
+    GB_set_palette(&gb, [GBPaletteEditorController userPalette]);
 }
 
 - (void) updateBorderMode
@@ -576,12 +563,12 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 - (void) loadBootROM: (GB_boot_rom_t)type
 {
     static NSString *const names[] = {
-        [GB_BOOT_ROM_DMG0] = @"dmg0_boot",
+        [GB_BOOT_ROM_DMG_0] = @"dmg0_boot",
         [GB_BOOT_ROM_DMG] = @"dmg_boot",
         [GB_BOOT_ROM_MGB] = @"mgb_boot",
         [GB_BOOT_ROM_SGB] = @"sgb_boot",
         [GB_BOOT_ROM_SGB2] = @"sgb2_boot",
-        [GB_BOOT_ROM_CGB0] = @"cgb0_boot",
+        [GB_BOOT_ROM_CGB_0] = @"cgb0_boot",
         [GB_BOOT_ROM_CGB] = @"cgb_boot",
         [GB_BOOT_ROM_AGB] = @"agb_boot",
     };
@@ -1952,7 +1939,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 {
     bool shouldResume = running;
     [self stop];
-    NSSavePanel * savePanel = [NSSavePanel savePanel];
+    NSSavePanel *savePanel = [NSSavePanel savePanel];
     [savePanel setAllowedFileTypes:@[@"png"]];
     [savePanel beginSheetModalForWindow:self.printerFeedWindow completionHandler:^(NSInteger result) {
         if (result == NSModalResponseOK) {
