@@ -658,6 +658,7 @@ struct GB_gameboy_internal_s {
         GB_icd_vreset_callback_t icd_hreset_callback;
         GB_icd_vreset_callback_t icd_vreset_callback;
         GB_read_memory_callback_t read_memory_callback;
+        GB_write_memory_callback_t write_memory_callback;
         GB_boot_rom_load_callback_t boot_rom_load_callback;
         GB_print_image_callback_t printer_callback;
         GB_workboy_set_time_callback workboy_set_time_callback;
@@ -742,6 +743,7 @@ struct GB_gameboy_internal_s {
         /* Temporary state */
         bool wx_just_changed;
         bool tile_sel_glitch;
+        bool disable_oam_corruption; // For safe memory reads
                
         GB_gbs_header_t gbs_header;
    );
@@ -763,6 +765,7 @@ __attribute__((__format__ (__printf__, fmtarg, firstvararg)))
 void GB_init(GB_gameboy_t *gb, GB_model_t model);
 bool GB_is_inited(GB_gameboy_t *gb);
 bool GB_is_cgb(GB_gameboy_t *gb);
+bool GB_is_cgb_in_cgb_mode(GB_gameboy_t *gb);
 bool GB_is_sgb(GB_gameboy_t *gb); // Returns true if the model is SGB or SGB2
 bool GB_is_hle_sgb(GB_gameboy_t *gb); // Returns true if the model is SGB or SGB2 and the SFC/SNES side is HLE'd
 GB_model_t GB_get_model(GB_gameboy_t *gb);
