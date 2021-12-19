@@ -434,7 +434,9 @@ static uint8_t read_high_memory(GB_gameboy_t *gb, uint16_t addr)
 
     if (addr < 0xFF00) {
         if (gb->oam_write_blocked && !GB_is_cgb(gb)) {
-            GB_trigger_oam_bug_read(gb, addr);
+            if (!gb->disable_oam_corruption) {
+                GB_trigger_oam_bug_read(gb, addr);
+            }
             return 0xff;
         }
         
@@ -568,6 +570,7 @@ static uint8_t read_high_memory(GB_gameboy_t *gb, uint16_t addr)
                 return ((gb->apu.is_active[GB_NOISE] ? (gb->apu.samples[GB_NOISE] << 4) : 0) |
                         (gb->apu.is_active[GB_WAVE] ? (gb->apu.samples[GB_WAVE]) : 0))  & (gb->model <= GB_MODEL_CGB_C? gb->apu.pcm_mask[1] : 0xFF);
             case GB_IO_JOYP:
+                gb->joyp_accessed = true;
                 GB_timing_sync(gb);
             case GB_IO_TMA:
             case GB_IO_LCDC:
@@ -625,7 +628,7 @@ static uint8_t read_high_memory(GB_gameboy_t *gb, uint16_t addr)
                 uint8_t index_reg = (addr & 0xFF) - 1;
                 return ((addr & 0xFF) == GB_IO_BGPD?
                        gb->background_palettes_data :
-                       gb->sprite_palettes_data)[gb->io_registers[index_reg] & 0x3F];
+                       gb->object_palettes_data)[gb->io_registers[index_reg] & 0x3F];
             }
 
             case GB_IO_KEY1:
@@ -704,6 +707,9 @@ uint8_t GB_read_memory(GB_gameboy_t *gb, uint16_t addr)
 
 uint8_t GB_safe_read_memory(GB_gameboy_t *gb, uint16_t addr)
 {
+    if (unlikely(addr == 0xFF00 + GB_IO_JOYP)) {
+        return gb->io_registers[GB_IO_JOYP];
+    }
     gb->disable_oam_corruption = true;
     uint8_t data = read_map[addr >> 12](gb, addr);
     gb->disable_oam_corruption = false;
@@ -1453,7 +1459,7 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 }
                 ((addr & 0xFF) == GB_IO_BGPD?
                  gb->background_palettes_data :
-                 gb->sprite_palettes_data)[gb->io_registers[index_reg] & 0x3F] = value;
+                 gb->object_palettes_data)[gb->io_registers[index_reg] & 0x3F] = value;
                 GB_palette_changed(gb, (addr & 0xFF) == GB_IO_BGPD, gb->io_registers[index_reg] & 0x3F);
                 if (gb->io_registers[index_reg] & 0x80) {
                     gb->io_registers[index_reg]++;

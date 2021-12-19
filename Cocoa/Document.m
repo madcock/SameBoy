@@ -1043,6 +1043,13 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     else if ([anItem action] == @selector(toggleCheats:)) {
         [(NSMenuItem*)anItem setState:GB_cheats_enabled(&gb)];
     }
+    else if ([anItem action] == @selector(toggleDisplayBackground:)) {
+        [(NSMenuItem*)anItem setState:!GB_is_background_rendering_disabled(&gb)];
+    }
+    else if ([anItem action] == @selector(toggleDisplayObjects:)) {
+        [(NSMenuItem*)anItem setState:!GB_is_object_rendering_disabled(&gb)];
+    }
+    
     return [super validateUserInterfaceItem:anItem];
 }
 
@@ -1459,7 +1466,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (!oamUpdating) {
                         oamUpdating = true;
-                        [self.spritesTableView reloadData];
+                        [self.objectsTableView reloadData];
                         oamUpdating = false;
                     }
                 });
@@ -1822,7 +1829,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     if (tableView == self.paletteTableView) {
         return 16; /* 8 BG palettes, 8 OBJ palettes*/
     }
-    else if (tableView == self.spritesTableView) {
+    else if (tableView == self.objectsTableView) {
         return oamCount;
     }
     return 0;
@@ -1841,7 +1848,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
         uint16_t index = columnIndex - 1 + (row & 7) * 4;
         return @((palette_data[(index << 1) + 1] << 8) | palette_data[(index << 1)]);
     }
-    else if (tableView == self.spritesTableView) {
+    else if (tableView == self.objectsTableView) {
         switch (columnIndex) {
             case 0:
                 return [Document imageFromData:[NSData dataWithBytesNoCopy:oamInfo[row].image
@@ -1875,7 +1882,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
                         oamInfo[row].flags & 0x20? 'X' : '-',
                         oamInfo[row].flags & 0x10? 1 : 0];
             case 7:
-                return oamInfo[row].obscured_by_line_limit? @"Dropped: Too many sprites in line": @"";
+                return oamInfo[row].obscured_by_line_limit? @"Dropped: Too many objects in line": @"";
 
         }
     }
@@ -1884,7 +1891,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 
 - (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(NSInteger)row
 {
-    return tableView == self.spritesTableView;
+    return tableView == self.objectsTableView;
 }
 
 - (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(nullable NSTableColumn *)tableColumn row:(NSInteger)row
@@ -2305,6 +2312,16 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     [[NSPasteboard generalPasteboard] clearContents];
     [[NSPasteboard generalPasteboard] writeObjects:@[image]];
     [self.osdView displayText:@"Screenshot copied"];
+}
+
+- (IBAction)toggleDisplayBackground:(id)sender
+{
+    GB_set_background_rendering_disabled(&gb, !GB_is_background_rendering_disabled(&gb));
+}
+
+- (IBAction)toggleDisplayObjects:(id)sender
+{
+    GB_set_object_rendering_disabled(&gb, !GB_is_object_rendering_disabled(&gb));
 }
 
 @end
