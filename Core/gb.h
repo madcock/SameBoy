@@ -3,6 +3,7 @@
 #define typeof __typeof__
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdalign.h>
 #include <time.h>
 
 #include "defs.h"
@@ -214,8 +215,8 @@ enum {
     /* CGB Paletts */
     GB_IO_BGPI       = 0x68, // CGB Mode Only - Background Palette Index
     GB_IO_BGPD       = 0x69, // CGB Mode Only - Background Palette Data
-    GB_IO_OBPI       = 0x6a, // CGB Mode Only - Sprite Palette Index
-    GB_IO_OBPD       = 0x6b, // CGB Mode Only - Sprite Palette Data
+    GB_IO_OBPI       = 0x6a, // CGB Mode Only - Object Palette Index
+    GB_IO_OBPD       = 0x6b, // CGB Mode Only - Object Palette Data
     GB_IO_OPRI       = 0x6c, // Affects object priority (X based or index based)
 
     /* Missing */
@@ -246,11 +247,6 @@ typedef enum {
     GB_BOOT_ROM_CGB,
     GB_BOOT_ROM_AGB,
 } GB_boot_rom_t;
-
-typedef enum {
-    GB_RTC_MODE_SYNC_TO_HOST,
-    GB_RTC_MODE_ACCURATE,
-} GB_rtc_mode_t;
 
 #ifdef GB_INTERNAL
 #define LCDC_PERIOD 70224
@@ -283,14 +279,17 @@ typedef void (*GB_icd_hreset_callback_t)(GB_gameboy_t *gb);
 typedef void (*GB_icd_vreset_callback_t)(GB_gameboy_t *gb);
 typedef void (*GB_boot_rom_load_callback_t)(GB_gameboy_t *gb, GB_boot_rom_t type);
 
+typedef void (*GB_execution_callback_t)(GB_gameboy_t *gb, uint16_t address, uint8_t opcode);
+typedef void (*GB_lcd_line_callback_t)(GB_gameboy_t *gb, uint8_t line);
+
 struct GB_breakpoint_s;
 struct GB_watchpoint_s;
 
 typedef struct {
     uint8_t pixel; // Color, 0-3
     uint8_t palette; // Palette, 0 - 7 (CGB); 0-1 in DMG (or just 0 for BG)
-    uint8_t priority; // Sprite priority – 0 in DMG, OAM index in CGB
-    bool bg_priority; // For sprite FIFO – the BG priority bit. For the BG FIFO – the CGB attributes priority bit
+    uint8_t priority; // Object priority – 0 in DMG, OAM index in CGB
+    bool bg_priority; // For object FIFO – the BG priority bit. For the BG FIFO – the CGB attributes priority bit
 } GB_fifo_item_t;
 
 #define GB_FIFO_LENGTH 16
@@ -323,6 +322,31 @@ typedef struct {
     char copyright[33];
 } GB_gbs_info_t;
 
+/* Duplicated so it can remain anonymous in GB_gameboy_t */
+typedef union {
+    uint16_t registers[GB_REGISTERS_16_BIT];
+    struct {
+        uint16_t af,
+        bc,
+        de,
+        hl,
+        sp;
+    };
+    struct {
+#ifdef GB_BIG_ENDIAN
+        uint8_t a, f,
+        b, c,
+        d, e,
+        h, l;
+#else
+        uint8_t f, a,
+        c, b,
+        e, d,
+        l, h;
+#endif
+    };
+} GB_registers_t;
+
 /* When state saving, each section is dumped independently of other sections.
    This allows adding data to the end of the section without worrying about future compatibility.
    Some other changes might be "safe" as well.
@@ -347,30 +371,29 @@ struct GB_gameboy_internal_s {
     GB_SECTION(core_state,
         /* Registers */
         uint16_t pc;
-           union {
-               uint16_t registers[GB_REGISTERS_16_BIT];
-               struct {
-                   uint16_t af,
-                            bc,
-                            de,
-                            hl,
-                            sp;
-               };
-               struct {
+        union {
+            uint16_t registers[GB_REGISTERS_16_BIT];
+            struct {
+                uint16_t af,
+                         bc,
+                         de,
+                         hl,
+                         sp;
+            };
+            struct {
 #ifdef GB_BIG_ENDIAN
-                   uint8_t a, f,
-                           b, c,
-                           d, e,
-                           h, l;
+                uint8_t a, f,
+                        b, c,
+                        d, e,
+                        h, l;
 #else
-                   uint8_t f, a,
-                           c, b,
-                           e, d,
-                           l, h;
+                uint8_t f, a,
+                        c, b,
+                        e, d,
+                        l, h;
 #endif
-               };
-               
-           };
+            };
+        };
         uint8_t ime;
         uint8_t interrupt_enable;
         uint8_t cgb_ram_bank;
@@ -514,6 +537,9 @@ struct GB_gameboy_internal_s {
         int32_t speed_switch_halt_countdown;
         uint8_t speed_switch_countdown; // To compensate for the lack of pipeline emulation
         uint8_t speed_switch_freeze; // Solely for realigning the PPU, should be removed when the odd modes are implemented
+        /* For timing of the vblank callback */
+        uint32_t cycles_since_vblank_callback;
+        bool lcd_disabled_outside_of_vblank;
     );
 
     /* APU */
@@ -535,7 +561,7 @@ struct GB_gameboy_internal_s {
         bool cgb_vram_bank;
         uint8_t oam[0xA0];
         uint8_t background_palettes_data[0x40];
-        uint8_t sprite_palettes_data[0x40];
+        uint8_t object_palettes_data[0x40];
         uint8_t position_in_line;
         bool stat_interrupt_line;
         uint8_t effective_scx;
@@ -574,12 +600,11 @@ struct GB_gameboy_internal_s {
         uint8_t n_visible_objs;
         uint8_t oam_search_index;
         uint8_t accessed_oam_row;
-        uint8_t extra_penalty_for_sprite_at_0;
+        uint8_t extra_penalty_for_object_at_0;
         uint8_t mode_for_interrupt;
         bool lyc_interrupt_line;
         bool cgb_palettes_blocked;
         uint8_t current_lcd_line; // The LCD can go out of sync since the vsync signal is skipped in some cases.
-        uint32_t cycles_in_stop_mode;
         uint8_t object_priority;
         bool oam_ppu_blocked;
         bool vram_ppu_blocked;
@@ -620,7 +645,7 @@ struct GB_gameboy_internal_s {
         /* I/O */
         uint32_t *screen;
         uint32_t background_palettes_rgb[0x20];
-        uint32_t sprite_palettes_rgb[0x20];
+        uint32_t object_palettes_rgb[0x20];
         const GB_palette_t *dmg_palette;
         GB_color_correction_mode_t color_correction_mode;
         double light_temperature;
@@ -630,11 +655,16 @@ struct GB_gameboy_internal_s {
         GB_sgb_border_t borrowed_border;
         bool tried_loading_sgb_border;
         bool has_sgb_border;
-               
+        bool objects_disabled;
+        bool background_disabled;
+        bool joyp_accessed;
+        bool illegal_inputs_allowed;
+
         /* Timing */
         uint64_t last_sync;
         uint64_t cycles_since_last_sync; // In 8MHz units
         GB_rtc_mode_t rtc_mode;
+        uint32_t rtc_second_length;
 
         /* Audio */
         GB_apu_output_t apu_output;
@@ -663,6 +693,8 @@ struct GB_gameboy_internal_s {
         GB_print_image_callback_t printer_callback;
         GB_workboy_set_time_callback workboy_set_time_callback;
         GB_workboy_get_time_callback workboy_get_time_callback;
+        GB_execution_callback_t execution_callback;
+        GB_lcd_line_callback_t lcd_line_callback;
 
         /*** Debugger ***/
         volatile bool debug_stopped, debug_disable;
@@ -751,7 +783,7 @@ struct GB_gameboy_internal_s {
     
 #ifndef GB_INTERNAL
 struct GB_gameboy_s {
-    char __internal[sizeof(struct GB_gameboy_internal_s)];
+    alignas(struct GB_gameboy_internal_s) uint8_t __internal[sizeof(struct GB_gameboy_internal_s)];
 };
 #endif
 
@@ -795,6 +827,7 @@ typedef enum {
 /* Returns a mutable pointer to various hardware memories. If that memory is banked, the current bank
    is returned at *bank, even if only a portion of the memory is banked. */
 void *GB_get_direct_access(GB_gameboy_t *gb, GB_direct_access_t access, size_t *size, uint16_t *bank);
+GB_registers_t *GB_get_registers(GB_gameboy_t *gb);
 
 void *GB_get_user_data(GB_gameboy_t *gb);
 void GB_set_user_data(GB_gameboy_t *gb, void *data);
@@ -837,6 +870,9 @@ void GB_set_update_input_hint_callback(GB_gameboy_t *gb, GB_update_input_hint_ca
 /* Called when a new boot ROM is needed. The callback should call GB_load_boot_rom or GB_load_boot_rom_from_buffer */
 void GB_set_boot_rom_load_callback(GB_gameboy_t *gb, GB_boot_rom_load_callback_t callback);
     
+void GB_set_execution_callback(GB_gameboy_t *gb, GB_execution_callback_t callback);
+void GB_set_lcd_line_callback(GB_gameboy_t *gb, GB_lcd_line_callback_t callback);
+
 void GB_set_palette(GB_gameboy_t *gb, const GB_palette_t *palette);
 
 /* These APIs are used when using internal clock */
@@ -851,10 +887,7 @@ void GB_disconnect_serial(GB_gameboy_t *gb);
     
 /* For cartridges with an alarm clock */
 unsigned GB_time_to_alarm(GB_gameboy_t *gb); // 0 if no alarm
-    
-/* RTC emulation mode */
-void GB_set_rtc_mode(GB_gameboy_t *gb, GB_rtc_mode_t mode);
-    
+
 /* For cartridges motion controls */
 bool GB_has_accelerometer(GB_gameboy_t *gb);
 // In units of g (gravity's acceleration).

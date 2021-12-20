@@ -1151,6 +1151,9 @@ uint8_t GB_run(GB_gameboy_t *gb)
         GB_debugger_handle_async_commands(gb);
         GB_rewind_push(gb);
     }
+    if (!(gb->io_registers[GB_IO_IF] & 0x10) && (gb->io_registers[GB_IO_JOYP] & 0x30) != 0x30) {
+        gb->joyp_accessed = true;
+    }
     return gb->cycles_since_run;
 }
 
@@ -1206,6 +1209,16 @@ void GB_set_async_input_callback(GB_gameboy_t *gb, GB_input_callback_t callback)
 #endif
 }
 
+void GB_set_execution_callback(GB_gameboy_t *gb, GB_execution_callback_t callback)
+{
+    gb->execution_callback = callback;
+}
+
+void GB_set_lcd_line_callback(GB_gameboy_t *gb, GB_lcd_line_callback_t callback)
+{
+    gb->lcd_line_callback = callback;
+}
+
 const GB_palette_t GB_PALETTE_GREY = {{{0x00, 0x00, 0x00}, {0x55, 0x55, 0x55}, {0xaa, 0xaa, 0xaa}, {0xff, 0xff, 0xff}, {0xff, 0xff, 0xff}}};
 const GB_palette_t GB_PALETTE_DMG  = {{{0x08, 0x18, 0x10}, {0x39, 0x61, 0x39}, {0x84, 0xa5, 0x63}, {0xc6, 0xde, 0x8c}, {0xd2, 0xe6, 0xa6}}};
 const GB_palette_t GB_PALETTE_MGB  = {{{0x07, 0x10, 0x0e}, {0x3a, 0x4c, 0x3a}, {0x81, 0x8d, 0x66}, {0xc2, 0xce, 0x93}, {0xcf, 0xda, 0xac}}};
@@ -1215,13 +1228,13 @@ static void update_dmg_palette(GB_gameboy_t *gb)
 {
     const GB_palette_t *palette = gb->dmg_palette ?: &GB_PALETTE_GREY;
     if (gb->rgb_encode_callback && !GB_is_cgb(gb)) {
-        gb->sprite_palettes_rgb[4] = gb->sprite_palettes_rgb[0] = gb->background_palettes_rgb[0] =
+        gb->object_palettes_rgb[4] = gb->object_palettes_rgb[0] = gb->background_palettes_rgb[0] =
         gb->rgb_encode_callback(gb, palette->colors[3].r, palette->colors[3].g, palette->colors[3].b);
-        gb->sprite_palettes_rgb[5] = gb->sprite_palettes_rgb[1] = gb->background_palettes_rgb[1] =
+        gb->object_palettes_rgb[5] = gb->object_palettes_rgb[1] = gb->background_palettes_rgb[1] =
         gb->rgb_encode_callback(gb, palette->colors[2].r, palette->colors[2].g, palette->colors[2].b);
-        gb->sprite_palettes_rgb[6] = gb->sprite_palettes_rgb[2] = gb->background_palettes_rgb[2] =
+        gb->object_palettes_rgb[6] = gb->object_palettes_rgb[2] = gb->background_palettes_rgb[2] =
         gb->rgb_encode_callback(gb, palette->colors[1].r, palette->colors[1].g, palette->colors[1].b);
-        gb->sprite_palettes_rgb[7] = gb->sprite_palettes_rgb[3] = gb->background_palettes_rgb[3] =
+        gb->object_palettes_rgb[7] = gb->object_palettes_rgb[3] = gb->background_palettes_rgb[3] =
         gb->rgb_encode_callback(gb, palette->colors[0].r, palette->colors[0].g, palette->colors[0].b);
         
         // LCD off color
@@ -1316,7 +1329,7 @@ bool GB_is_inited(GB_gameboy_t *gb)
 
 bool GB_is_cgb(GB_gameboy_t *gb)
 {
-    return (gb->model & GB_MODEL_FAMILY_MASK) == GB_MODEL_CGB_FAMILY;
+    return gb->model >= GB_MODEL_CGB_0;
 }
 
 bool GB_is_cgb_in_cgb_mode(GB_gameboy_t *gb)
@@ -1527,7 +1540,7 @@ static void reset_ram(GB_gameboy_t *gb)
     if (GB_is_cgb(gb)) {
         for (unsigned i = 0; i < 64; i++) {
             gb->background_palettes_data[i] = GB_random(); /* Doesn't really matter as the boot ROM overrides it anyway*/
-            gb->sprite_palettes_data[i] = GB_random();
+            gb->object_palettes_data[i] = GB_random();
         }
         for (unsigned i = 0; i < 32; i++) {
             GB_palette_changed(gb, true, i * 2);
@@ -1723,9 +1736,9 @@ void *GB_get_direct_access(GB_gameboy_t *gb, GB_direct_access_t access, size_t *
             *bank = 0;
             return &gb->background_palettes_data;
         case GB_DIRECT_ACCESS_OBP:
-            *size = sizeof(gb->sprite_palettes_data);
+            *size = sizeof(gb->object_palettes_data);
             *bank = 0;
-            return &gb->sprite_palettes_data;
+            return &gb->object_palettes_data;
         case GB_DIRECT_ACCESS_IE:
             *size = sizeof(gb->interrupt_enable);
             *bank = 0;
@@ -1735,6 +1748,11 @@ void *GB_get_direct_access(GB_gameboy_t *gb, GB_direct_access_t access, size_t *
             *bank = 0;
             return NULL;
     }
+}
+
+GB_registers_t *GB_get_registers(GB_gameboy_t *gb)
+{
+    return (GB_registers_t *)&gb->registers;
 }
 
 void GB_set_clock_multiplier(GB_gameboy_t *gb, double multiplier)
@@ -1842,15 +1860,6 @@ unsigned GB_time_to_alarm(GB_gameboy_t *gb)
     unsigned alarm_time = (gb->huc3.alarm_days & 0x1FFF) * 24 * 60 * 60 + gb->huc3.alarm_minutes * 60;
     if (current_time > alarm_time) return 0;
     return alarm_time - current_time;
-}
-
-void GB_set_rtc_mode(GB_gameboy_t *gb, GB_rtc_mode_t mode)
-{
-    if (gb->rtc_mode != mode) {
-        gb->rtc_mode = mode;
-        gb->rtc_cycles = 0;
-        gb->last_rtc_second = time(NULL);
-    }
 }
 
 bool GB_has_accelerometer(GB_gameboy_t *gb)

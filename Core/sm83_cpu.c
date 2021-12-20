@@ -198,7 +198,7 @@ static void cycle_write(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
             /* Similar to the palette registers, these interact directly with the LCD, so they appear to be affected by it. Both my DMG (B, blob) and Game Boy Light behave this way though.
              
                Additionally, LCDC.1 is very nasty because on the it is read both by the FIFO when popping pixels,
-               and the sprite-fetching state machine, and both behave differently when it comes to access conflicts.
+               and the object-fetching state machine, and both behave differently when it comes to access conflicts.
                Hacks ahead.
              */
             
@@ -363,6 +363,9 @@ static void leave_stop_mode(GB_gameboy_t *gb)
 static void stop(GB_gameboy_t *gb, uint8_t opcode)
 {
     flush_pending_cycles(gb);
+    if ((gb->io_registers[GB_IO_JOYP] & 0x30) != 0x30) {
+        gb->joyp_accessed = true;
+    }
     bool exit_by_joyp = ((gb->io_registers[GB_IO_JOYP] & 0xF) != 0xF);
     bool speed_switch = (gb->io_registers[GB_IO_KEY1] & 0x1) && !exit_by_joyp;
     bool immediate_exit = speed_switch || exit_by_joyp;
@@ -1575,6 +1578,9 @@ void GB_cpu_run(GB_gameboy_t *gb)
     if (gb->stopped) {
         GB_timing_sync(gb);
         GB_advance_cycles(gb, 4);
+        if ((gb->io_registers[GB_IO_JOYP] & 0x30) != 0x30) {
+            gb->joyp_accessed = true;
+        }
         if ((gb->io_registers[GB_IO_JOYP] & 0xF) != 0xF) {
             leave_stop_mode(gb);
             GB_advance_cycles(gb, 8);
@@ -1639,6 +1645,10 @@ void GB_cpu_run(GB_gameboy_t *gb)
                 interrupt_queue >>= 1;
                 interrupt_bit++;
             }
+            assert(gb->pending_cycles > 2);
+            gb->pending_cycles -= 2;
+            flush_pending_cycles(gb);
+            gb->pending_cycles = 2;
             gb->io_registers[GB_IO_IF] &= ~(1 << interrupt_bit);
             gb->pc = interrupt_bit * 8 + 0x40;
         }
@@ -1651,7 +1661,10 @@ void GB_cpu_run(GB_gameboy_t *gb)
     /* Run mode */
     else if (!gb->halted) {
         gb->last_opcode_read = cycle_read(gb, gb->pc++);
-        if (gb->halt_bug) {
+        if (unlikely(gb->execution_callback)) {
+            gb->execution_callback(gb, gb->pc - 1, gb->last_opcode_read);
+        }
+        if (unlikely(gb->halt_bug)) {
             gb->pc--;
             gb->halt_bug = false;
         }

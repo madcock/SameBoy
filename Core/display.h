@@ -10,6 +10,7 @@ internal void GB_display_run(GB_gameboy_t *gb, uint8_t cycles);
 internal void GB_palette_changed(GB_gameboy_t *gb, bool background_palette, uint8_t index);
 internal void GB_STAT_update(GB_gameboy_t *gb);
 internal void GB_lcd_off(GB_gameboy_t *gb);
+internal void GB_display_vblank(GB_gameboy_t *gb);
 
 enum {
   GB_OBJECT_PRIORITY_X,
@@ -55,9 +56,16 @@ typedef enum {
 
 void GB_draw_tileset(GB_gameboy_t *gb, uint32_t *dest, GB_palette_type_t palette_type, uint8_t palette_index);
 void GB_draw_tilemap(GB_gameboy_t *gb, uint32_t *dest, GB_palette_type_t palette_type, uint8_t palette_index, GB_map_type_t map_type, GB_tileset_type_t tileset_type);
-uint8_t GB_get_oam_info(GB_gameboy_t *gb, GB_oam_info_t *dest, uint8_t *sprite_height);
+uint8_t GB_get_oam_info(GB_gameboy_t *gb, GB_oam_info_t *dest, uint8_t *object_height);
 uint32_t GB_convert_rgb15(GB_gameboy_t *gb, uint16_t color, bool for_border);
 void GB_set_color_correction_mode(GB_gameboy_t *gb, GB_color_correction_mode_t mode);
 void GB_set_light_temperature(GB_gameboy_t *gb, double temperature);
 bool GB_is_odd_frame(GB_gameboy_t *gb);
+
+void GB_set_object_rendering_disabled(GB_gameboy_t *gb, bool disabled);
+void GB_set_background_rendering_disabled(GB_gameboy_t *gb, bool disabled);
+bool GB_is_object_rendering_disabled(GB_gameboy_t *gb);
+bool GB_is_background_rendering_disabled(GB_gameboy_t *gb);
+
+
 #endif /* display_h */
