@@ -540,6 +540,8 @@ struct GB_gameboy_internal_s {
         /* For timing of the vblank callback */
         uint32_t cycles_since_vblank_callback;
         bool lcd_disabled_outside_of_vblank;
+        int32_t allowed_pending_cycles;
+        uint16_t mode3_batching_length;
     );
 
     /* APU */
@@ -665,6 +667,8 @@ struct GB_gameboy_internal_s {
         uint64_t cycles_since_last_sync; // In 8MHz units
         GB_rtc_mode_t rtc_mode;
         uint32_t rtc_second_length;
+        uint32_t clock_rate;
+        uint32_t unmultiplied_clock_rate;
 
         /* Audio */
         GB_apu_output_t apu_output;
@@ -796,7 +800,7 @@ __attribute__((__format__ (__printf__, fmtarg, firstvararg)))
 
 void GB_init(GB_gameboy_t *gb, GB_model_t model);
 bool GB_is_inited(GB_gameboy_t *gb);
-bool GB_is_cgb(GB_gameboy_t *gb);
+bool GB_is_cgb(const GB_gameboy_t *gb);
 bool GB_is_cgb_in_cgb_mode(GB_gameboy_t *gb);
 bool GB_is_sgb(GB_gameboy_t *gb); // Returns true if the model is SGB or SGB2
 bool GB_is_hle_sgb(GB_gameboy_t *gb); // Returns true if the model is SGB or SGB2 and the SFC/SNES side is HLE'd
@@ -916,6 +920,7 @@ uint32_t GB_get_rom_crc32(GB_gameboy_t *gb);
 
 #ifdef GB_INTERNAL
 internal void GB_borrow_sgb_border(GB_gameboy_t *gb);
+internal void GB_update_clock_rate(GB_gameboy_t *gb);
 #endif
     
 #endif /* GB_h */
