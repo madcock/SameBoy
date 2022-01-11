@@ -40,6 +40,8 @@ bool GB_apu_is_DAC_enabled(GB_gameboy_t *gb, unsigned index)
 
         case GB_NOISE:
             return gb->io_registers[GB_IO_NR42] & 0xF8;
+            
+        nodefault;
     }
 
     return false;
@@ -58,6 +60,8 @@ static uint8_t agb_bias_for_channel(GB_gameboy_t *gb, unsigned index)
             return 0;
         case GB_NOISE:
             return gb->apu.noise_channel.current_volume;
+            
+        nodefault;
     }
     return 0;
 }
@@ -897,7 +901,7 @@ static inline uint16_t effective_channel4_counter(GB_gameboy_t *gb)
         case GB_MODEL_SGB2:
         case GB_MODEL_SGB2_NO_SFC:
         case GB_MODEL_CGB_0:
-            // case GB_MODEL_CGB_A:
+        case GB_MODEL_CGB_A:
         case GB_MODEL_CGB_C:
             if (effective_counter & 8) {
                 effective_counter |= 0xE; // Sometimes F on some instances
@@ -998,7 +1002,9 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
             /* These registers affect the output of all 4 channels (but not the output of the PCM registers).*/
             /* We call update_samples with the current value so the APU output is updated with the new outputs */
             for (unsigned i = GB_N_CHANNELS; i--;) {
-                update_sample(gb, i, gb->apu.samples[i], 0);
+                int8_t sample = gb->apu.samples[i];
+                gb->apu.samples[i] = 0x10; // Invalidate to force update
+                update_sample(gb, i, sample, 0);
             }
             break;
         case GB_IO_NR52: {

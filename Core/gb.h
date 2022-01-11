@@ -97,7 +97,7 @@ typedef enum {
     GB_MODEL_SGB2 = 0x101,
     GB_MODEL_SGB2_NO_SFC = GB_MODEL_SGB2 | GB_MODEL_NO_SFC_BIT,
     GB_MODEL_CGB_0 = 0x200,
-    // GB_MODEL_CGB_A = 0x201,
+    GB_MODEL_CGB_A = 0x201,
     GB_MODEL_CGB_B = 0x202,
     GB_MODEL_CGB_C = 0x203,
     GB_MODEL_CGB_D = 0x204,
@@ -436,6 +436,8 @@ struct GB_gameboy_internal_s {
         uint16_t dma_current_src;
         int16_t dma_cycles;
         bool is_dma_restarting;
+        uint8_t dma_and_pattern;
+        bool dma_skip_write;
         uint8_t last_opcode_read; /* Required to emulte HDMA reads from Exxx */
         bool hdma_starting;
     );

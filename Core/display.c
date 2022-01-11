@@ -167,7 +167,10 @@ void GB_display_vblank(GB_gameboy_t *gb)
             };
             unsigned index = gb->rom? gb->rom[0x14e] % 5 : 0;
             if (gb->model == GB_MODEL_CGB_0) {
-                index = 1; // CGB 0 was only available in Indigo!
+                index = 1; // CGB 0 was only available in indigo!
+            }
+            else if (gb->model == GB_MODEL_CGB_A) {
+                index = 0; // CGB A was only available in red!
             }
             gb->borrowed_border.palette[0] = LE16(colors[index]);
             gb->borrowed_border.palette[10] = LE16(colors[5 + index]);
@@ -834,6 +837,8 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb)
             gb->fetcher_state++;
         }
         break;
+        
+        nodefault;
     }
 }
 
