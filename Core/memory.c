@@ -251,7 +251,8 @@ void GB_trigger_oam_bug_read(GB_gameboy_t *gb, uint16_t address)
 
 static bool is_addr_in_dma_use(GB_gameboy_t *gb, uint16_t addr)
 {
-    if (!gb->dma_steps_left || (gb->dma_cycles < 0 && !gb->is_dma_restarting) || addr >= 0xfe00) return false;
+    if (!GB_is_dma_active(gb) || addr >= 0xfe00) return false;
+    if (gb->dma_current_dest == 0xFF) return false; // Warm up
     if (addr >= 0xfe00) return false;
     if (gb->dma_current_src == addr) return false; // Shortcut for DMA access flow
     if (gb->dma_current_src > 0xe000 && (gb->dma_current_src & ~0x2000) == addr) return false;
@@ -291,8 +292,18 @@ static uint8_t read_mbc_rom(GB_gameboy_t *gb, uint16_t addr)
 
 static uint8_t read_vram(GB_gameboy_t *gb, uint16_t addr)
 {
-    GB_display_sync(gb);
-    if (unlikely(gb->vram_read_blocked)) {
+    if (likely(!GB_is_dma_active(gb))) {
+        /* Prevent syncing from a DMA read. Batching doesn't happen during DMA anyway. */
+        GB_display_sync(gb);
+    }
+    else {
+        if ((gb->dma_current_dest & 0xE000) == 0x8000) {
+            // TODO: verify conflict behavior
+            return gb->vram[(addr & 0x1FFF) + (gb->cgb_vram_bank? 0x2000 : 0)];
+        }
+    }
+    
+    if (unlikely(gb->vram_read_blocked && !gb->in_dma_read)) {
         return 0xFF;
     }
     if (unlikely(gb->display_state == 22 && GB_is_cgb(gb) && !gb->cgb_double_speed)) {
@@ -482,7 +493,7 @@ static uint8_t read_high_memory(GB_gameboy_t *gb, uint16_t addr)
             return 0xff;
         }
         
-        if ((gb->dma_steps_left && (gb->dma_cycles > 0 || gb->is_dma_restarting))) {
+        if (GB_is_dma_active(gb)) {
             /* Todo: Does reading from OAM during DMA causes the OAM bug? */
             return 0xff;
         }
@@ -746,14 +757,14 @@ uint8_t GB_read_memory(GB_gameboy_t *gb, uint16_t addr)
 
         if (GB_is_cgb(gb) && bus_for_addr(gb, gb->dma_current_src) != GB_BUS_RAM && addr >= 0xc000) {
             // TODO: this should probably affect the DMA dest as well
-            addr = (gb->dma_current_src & 0x1000) | (addr & 0xFFF) | 0xC000;
+            addr = ((gb->dma_current_src - 1) & 0x1000) | (addr & 0xFFF) | 0xC000;
         }
         else if (GB_is_cgb(gb) && gb->dma_current_src >= 0xe000 && addr > 0xc000) {
             // TODO: this should probably affect the DMA dest as well
-            addr = (gb->dma_current_src & 0x1000) | (addr & 0xFFF) | 0xC000;
+            addr = ((gb->dma_current_src - 1) & 0x1000) | (addr & 0xFFF) | 0xC000;
         }
         else {
-            addr = gb->dma_current_src;
+            addr = (gb->dma_current_src - 1);
         }
     }
     uint8_t data = read_map[addr >> 12](gb, addr);
@@ -1209,7 +1220,7 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
             return;
         }
         
-        if ((gb->dma_steps_left && (gb->dma_cycles > 0 || gb->is_dma_restarting))) {
+        if (GB_is_dma_active(gb)) {
             /* Todo: Does writing to OAM during DMA causes the OAM bug? */
             return;
         }
@@ -1459,18 +1470,10 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 return;
 
             case GB_IO_DMA:
-                if (gb->dma_steps_left) {
-                    /* This is not correct emulation, since we're not really delaying the second DMA.
-                       One write that should have happened in the first DMA will not happen. However,
-                       since that byte will be overwritten by the second DMA before it can actually be
-                       read, it doesn't actually matter. */
-                    gb->is_dma_restarting = true;
-                }
-                gb->dma_and_pattern = 0xFF;
-                gb->dma_cycles = -7;
-                gb->dma_current_dest = 0;
+                gb->dma_cycles = 0;
+                gb->dma_cycles_modulo = 2;
+                gb->dma_current_dest = 0xFF;
                 gb->dma_current_src = value << 8;
-                gb->dma_steps_left = 0xa0;
                 gb->io_registers[GB_IO_DMA] = value;
                 return;
             case GB_IO_SVBK:
@@ -1663,23 +1666,24 @@ void GB_write_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
         
         if (GB_is_cgb(gb) && bus_for_addr(gb, gb->dma_current_src) != GB_BUS_RAM && addr >= 0xc000) {
             // TODO: this should probably affect the DMA dest as well
-            addr = (gb->dma_current_src & 0x1000) | (addr & 0xFFF) | 0xC000;
+            addr = ((gb->dma_current_src - 1) & 0x1000) | (addr & 0xFFF) | 0xC000;
         }
         else if (GB_is_cgb(gb) && gb->dma_current_src >= 0xe000 && addr > 0xc000) {
             // TODO: this should probably affect the DMA dest as well
-            addr = (gb->dma_current_src & 0x1000) | (addr & 0xFFF) | 0xC000;
+            addr = ((gb->dma_current_src - 1) & 0x1000) | (addr & 0xFFF) | 0xC000;
         }
         else {
-            addr = gb->dma_current_src;
+            addr = (gb->dma_current_src - 1);
         }
         if (GB_is_cgb(gb) || addr > 0xc000) {
-            gb->dma_and_pattern = addr < 0xc000? 0x00 : 0xFF;
-            if ((gb->model < GB_MODEL_CGB_0 || gb->model == GB_MODEL_CGB_B) && addr > 0xc000) {
-                gb->dma_and_pattern = value;
+            if (addr < 0xc000) {
+                gb->oam[gb->dma_current_dest - 1] = 0;
             }
-            else if ((gb->model < GB_MODEL_CGB_C || gb->model > GB_MODEL_CGB_E) && addr > 0xc000 && !oam_write) {
-                gb->dma_skip_write = true;
-                gb->oam[gb->dma_current_dest] = value;
+            else if ((gb->model < GB_MODEL_CGB_0 || gb->model == GB_MODEL_CGB_B)) {
+                gb->oam[gb->dma_current_dest - 1] &= value;
+            }
+            else if ((gb->model < GB_MODEL_CGB_C || gb->model > GB_MODEL_CGB_E) && !oam_write) {
+                gb->oam[gb->dma_current_dest - 1] = value;
             }
             if (gb->model < GB_MODEL_CGB_E || addr >= 0xc000) return;
         }
@@ -1687,35 +1691,41 @@ void GB_write_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
     write_map[addr >> 12](gb, addr, value);
 }
 
+bool GB_is_dma_active(GB_gameboy_t *gb)
+{
+    return gb->dma_current_dest != 0xa1;
+}
+
 void GB_dma_run(GB_gameboy_t *gb)
 {
-    while (unlikely(gb->dma_cycles >= 4 && gb->dma_steps_left)) {
-        /* Todo: measure this value */
-        gb->dma_cycles -= 4;
-        gb->dma_steps_left--;
-        if (gb->dma_skip_write) {
-            gb->dma_skip_write = false;
+    if (gb->dma_current_dest == 0xa1) return;
+    signed cycles = gb->dma_cycles + gb->dma_cycles_modulo;
+    gb->in_dma_read = true;
+    while (unlikely(cycles >= 4)) {
+        cycles -= 4;
+        if (gb->dma_current_dest >= 0xa0) {
             gb->dma_current_dest++;
+            break;
         }
-        else if (gb->dma_current_src < 0xe000) {
-            gb->oam[gb->dma_current_dest++] = GB_read_memory(gb, gb->dma_current_src) & gb->dma_and_pattern;
+        if (gb->dma_current_src < 0xe000) {
+            gb->oam[gb->dma_current_dest++] = GB_read_memory(gb, gb->dma_current_src);
         }
         else {
             if (GB_is_cgb(gb)) {
-                gb->oam[gb->dma_current_dest++] = gb->dma_and_pattern;
+                gb->oam[gb->dma_current_dest++] = 0;
             }
             else {
-                gb->oam[gb->dma_current_dest++] = GB_read_memory(gb, gb->dma_current_src & ~0x2000) & gb->dma_and_pattern;
+                gb->oam[gb->dma_current_dest++] = GB_read_memory(gb, gb->dma_current_src & ~0x2000);
             }
         }
-        gb->dma_and_pattern = 0xFF;
         
         /* dma_current_src must be the correct value during GB_read_memory */
         gb->dma_current_src++;
-        if (!gb->dma_steps_left) {
-            gb->is_dma_restarting = false;
-        }
+        gb->dma_ppu_vram_conflict = false;
     }
+    gb->in_dma_read = false;
+    gb->dma_cycles_modulo = cycles;
+    gb->dma_cycles = 0;
 }
 
 void GB_hdma_run(GB_gameboy_t *gb)

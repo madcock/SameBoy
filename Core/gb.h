@@ -36,6 +36,8 @@
 #define GB_MODEL_PAL_BIT 0x40
 #define GB_MODEL_NO_SFC_BIT 0x80
 
+#define GB_REWIND_FRAMES_PER_KEY 255
+
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define GB_BIG_ENDIAN
 #elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -44,6 +46,17 @@
 #error Unable to detect endianess
 #endif
 
+#ifdef GB_BIG_ENDIAN
+#define GB_REGISTER_ORDER a, f, \
+                          b, c, \
+                          d, e, \
+                          h, l
+#else
+#define GB_REGISTER_ORDER f, a, \
+                          c, b, \
+                          e, d, \
+                          l, h
+#endif
 
 typedef struct {
     struct GB_color_s {
@@ -335,17 +348,7 @@ typedef union {
                  pc;
     };
     struct {
-#ifdef GB_BIG_ENDIAN
-        uint8_t a, f,
-                b, c,
-                d, e,
-                h, l;
-#else
-        uint8_t f, a,
-                c, b,
-                e, d,
-                l, h;
-#endif
+        uint8_t GB_REGISTER_ORDER;
     };
 } GB_registers_t;
 
@@ -368,7 +371,7 @@ struct GB_gameboy_internal_s {
         /* The version field makes sure we don't load save state files with a completely different structure.
            This happens when struct fields are removed/resized in an backward incompatible manner. */
         uint32_t version;
-    );
+    )
 
     GB_SECTION(core_state,
         /* Registers */
@@ -383,17 +386,7 @@ struct GB_gameboy_internal_s {
                          pc;
             };
             struct {
-#ifdef GB_BIG_ENDIAN
-                uint8_t a, f,
-                        b, c,
-                        d, e,
-                        h, l;
-#else
-                uint8_t f, a,
-                        c, b,
-                        e, d,
-                        l, h;
-#endif
+                uint8_t GB_REGISTER_ORDER;
             };
         };
         uint8_t ime;
@@ -421,7 +414,7 @@ struct GB_gameboy_internal_s {
        int32_t ir_sensor;
        bool effective_ir_input;
        uint16_t address_bus;
-    );
+    )
 
     /* DMA and HDMA */
     GB_SECTION(dma,
@@ -431,16 +424,16 @@ struct GB_gameboy_internal_s {
         int16_t hdma_cycles; // in 8MHz units
         uint16_t hdma_current_src, hdma_current_dest;
 
-        uint8_t dma_steps_left;
         uint8_t dma_current_dest;
+        uint8_t last_dma_read;
         uint16_t dma_current_src;
-        int16_t dma_cycles;
-        bool is_dma_restarting;
-        uint8_t dma_and_pattern;
-        bool dma_skip_write;
-        uint8_t last_opcode_read; /* Required to emulte HDMA reads from Exxx */
+        uint16_t dma_cycles;
+        int8_t dma_cycles_modulo;
+        bool dma_ppu_vram_conflict;
+        uint16_t dma_ppu_vram_conflict_addr;
+        uint8_t last_opcode_read; /* Required to emulate HDMA reads from Exxx */
         bool hdma_starting;
-    );
+    )
     
     /* MBC */
     GB_SECTION(mbc,
@@ -518,15 +511,13 @@ struct GB_gameboy_internal_s {
         uint8_t camera_registers[0x36];
         uint8_t rumble_strength;
         bool cart_ir;
-
-    );
-
+    )
 
     /* HRAM and HW Registers */
     GB_SECTION(hram,
         uint8_t hram[0xFFFF - 0xFF80];
         uint8_t io_registers[0x80];
-    );
+    )
 
     /* Timing */
     GB_SECTION(timing,
@@ -546,12 +537,12 @@ struct GB_gameboy_internal_s {
         bool lcd_disabled_outside_of_vblank;
         int32_t allowed_pending_cycles;
         uint16_t mode3_batching_length;
-    );
+    )
 
     /* APU */
     GB_SECTION(apu,
         GB_apu_t apu;
-    );
+    )
 
     /* RTC */
     GB_SECTION(rtc,
@@ -559,7 +550,7 @@ struct GB_gameboy_internal_s {
         uint64_t last_rtc_second;
         uint32_t rtc_cycles;
         uint8_t tpp1_mr4;
-    );
+    )
 
     /* Video Display */
     GB_SECTION(video,
@@ -602,7 +593,10 @@ struct GB_gameboy_internal_s {
         bool wx166_glitch;
         bool wx_triggered;
         uint8_t visible_objs[10];
-        uint8_t obj_comparators[10];
+        uint8_t objects_x[10];
+        uint8_t objects_y[10];
+        uint8_t object_tile_data[2];
+        uint8_t object_flags;
         uint8_t n_visible_objs;
         uint8_t oam_search_index;
         uint8_t accessed_oam_row;
@@ -626,7 +620,7 @@ struct GB_gameboy_internal_s {
         uint16_t last_tile_index_address;
         bool cgb_repeated_a_frame;
         uint8_t data_for_sel_glitch;
-    );
+    )
 
     /* Unsaved data. This includes all pointers, as well as everything that shouldn't be on a save state */
     /* This data is reserved on reset and must come last in the struct */
@@ -746,7 +740,6 @@ struct GB_gameboy_internal_s {
         const char *undo_label;
 
         /* Rewind */
-#define GB_REWIND_FRAMES_PER_KEY 255
         size_t rewind_buffer_length;
         struct {
             uint8_t *key_state;
@@ -784,9 +777,10 @@ struct GB_gameboy_internal_s {
         bool wx_just_changed;
         bool tile_sel_glitch;
         bool disable_oam_corruption; // For safe memory reads
+        bool in_dma_read;
                
         GB_gbs_header_t gbs_header;
-   );
+   )
 };
     
 #ifndef GB_INTERNAL
