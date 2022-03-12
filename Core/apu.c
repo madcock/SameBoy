@@ -243,17 +243,13 @@ static void render(GB_gameboy_t *gb)
             unsigned left_volume = 0;
             unsigned right_volume = 0;
             unrolled for (unsigned i = GB_N_CHANNELS; i--;) {
-                if (gb->apu.is_active[i]) {
+                if (GB_apu_is_DAC_enabled(gb, i)) {
                     if (mask & 1) {
-                        left_volume += (gb->io_registers[GB_IO_NR50] & 7) * CH_STEP * 0xF;
+                        left_volume += ((gb->io_registers[GB_IO_NR50] & 7) + 1) * CH_STEP * 0xF;
                     }
                     if (mask & 0x10) {
-                        right_volume += ((gb->io_registers[GB_IO_NR50] >> 4) & 7) * CH_STEP * 0xF;
+                        right_volume += (((gb->io_registers[GB_IO_NR50] >> 4) & 7) + 1) * CH_STEP * 0xF;
                     }
-                }
-                else {
-                    left_volume += gb->apu_output.current_sample[i].left * CH_STEP;
-                    right_volume += gb->apu_output.current_sample[i].right * CH_STEP;
                 }
                 mask >>= 1;
             }
@@ -695,6 +691,14 @@ void GB_apu_run(GB_gameboy_t *gb, bool force)
         unrolled for (unsigned i = GB_SQUARE_1; i <= GB_SQUARE_2; i++) {
             if (gb->apu.is_active[i]) {
                 uint16_t cycles_left = cycles;
+                if (unlikely(gb->apu.square_channels[i].delay)) {
+                    if (gb->apu.square_channels[i].delay < cycles_left) {
+                        gb->apu.square_channels[i].delay = 0;
+                    }
+                    else {
+                        gb->apu.square_channels[i].delay -= cycles_left;
+                    }
+                }
                 while (unlikely(cycles_left > gb->apu.square_channels[i].sample_countdown)) {
                     cycles_left -= gb->apu.square_channels[i].sample_countdown + 1;
                     gb->apu.square_channels[i].sample_countdown = (gb->apu.square_channels[i].sample_length ^ 0x7FF) * 2 + 1;
@@ -704,7 +708,7 @@ void GB_apu_run(GB_gameboy_t *gb, bool force)
                     if (cycles_left == 0 && gb->apu.samples[i] == 0) {
                         gb->apu.pcm_mask[0] &= i == GB_SQUARE_1? 0xF0 : 0x0F;
                     }
-
+                    gb->apu.square_channels[i].did_tick = true;
                     update_square_sample(gb, i);
                 }
                 if (cycles_left) {
@@ -1103,7 +1107,8 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                 /* On an AGB, as well as on CGB C and earlier (TODO: Tested: 0, B and C), it behaves slightly different on
                    double speed. */
                 if (gb->model == GB_MODEL_CGB_E || gb->model == GB_MODEL_CGB_D || gb->apu.square_channels[index].sample_countdown & 1) {
-                    if (gb->apu.square_channels[index].sample_countdown >> 1 == (gb->apu.square_channels[index].sample_length ^ 0x7FF)) {
+                    if (gb->apu.square_channels[index].did_tick &&
+                        gb->apu.square_channels[index].sample_countdown >> 1 == (gb->apu.square_channels[index].sample_length ^ 0x7FF)) {
                         gb->apu.square_channels[index].current_sample_index--;
                         gb->apu.square_channels[index].current_sample_index &= 7;
                         gb->apu.square_channels[index].sample_surpressed = false;
@@ -1119,8 +1124,10 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                    turning the APU off. */
                 gb->apu.square_channels[index].envelope_clock.locked = false;
                 gb->apu.square_channels[index].envelope_clock.clock = false;
+                gb->apu.square_channels[index].did_tick = false;
                 if (!gb->apu.is_active[index]) {
-                    gb->apu.square_channels[index].sample_countdown = (gb->apu.square_channels[index].sample_length ^ 0x7FF) * 2 + 6 - gb->apu.lf_div;
+                    gb->apu.square_channels[index].delay = 6 - gb->apu.lf_div;
+                    gb->apu.square_channels[index].sample_countdown = (gb->apu.square_channels[index].sample_length ^ 0x7FF) * 2 + gb->apu.square_channels[index].delay;
                     if (gb->model <= GB_MODEL_CGB_C && gb->apu.lf_div) {
                         gb->apu.square_channels[index].sample_countdown += 2;
                     }
@@ -1128,7 +1135,7 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                 else {
                     unsigned extra_delay = 0;
                     if (gb->model == GB_MODEL_CGB_E || gb->model == GB_MODEL_CGB_D) {
-                        if (!(value & 4) && !(((gb->apu.square_channels[index].sample_countdown - 1) / 2) & 0x400)) {
+                        if (!(value & 4) && !(((gb->apu.square_channels[index].sample_countdown - 1 - gb->apu.square_channels[index].delay) / 2) & 0x400)) {
                             gb->apu.square_channels[index].current_sample_index++;
                             gb->apu.square_channels[index].current_sample_index &= 0x7;
                             gb->apu.square_channels[index].sample_surpressed = false;
@@ -1141,7 +1148,8 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                         }
                     }
                     /* Timing quirk: if already active, sound starts 2 (2MHz) ticks earlier.*/
-                    gb->apu.square_channels[index].sample_countdown = (gb->apu.square_channels[index].sample_length ^ 0x7FF) * 2 + 4 - gb->apu.lf_div + extra_delay;
+                    gb->apu.square_channels[index].delay = 4 - gb->apu.lf_div + extra_delay;
+                    gb->apu.square_channels[index].sample_countdown = (gb->apu.square_channels[index].sample_length ^ 0x7FF) * 2 + gb->apu.square_channels[index].delay;
                     if (gb->model <= GB_MODEL_CGB_C && gb->apu.lf_div) {
                         gb->apu.square_channels[index].sample_countdown += 2;
                     }
