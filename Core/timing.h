@@ -19,6 +19,7 @@ internal void GB_emulate_timer_glitch(GB_gameboy_t *gb, uint8_t old_tac, uint8_t
 internal bool GB_timing_sync_turbo(GB_gameboy_t *gb); /* Returns true if should skip frame */
 internal void GB_timing_sync(GB_gameboy_t *gb);
 internal void GB_set_internal_div_counter(GB_gameboy_t *gb, uint16_t value);
+internal void GB_serial_master_edge(GB_gameboy_t *gb);
 enum {
     GB_TIMA_RUNNING = 0,
     GB_TIMA_RELOADING = 1,
@@ -28,12 +29,22 @@ enum {
 
 #define GB_SLEEP(gb, unit, state, cycles) do {\
     (gb)->unit##_cycles -= (cycles) * __state_machine_divisor; \
-    if ((gb)->unit##_cycles <= 0) {\
+    if (unlikely((gb)->unit##_cycles <= 0)) {\
         (gb)->unit##_state = state;\
         return;\
         unit##state:; \
     }\
 } while (0)
+
+#define GB_BATCHPOINT(gb, unit, state, cycles) do {\
+unit##state:; \
+if (likely(__state_machine_allow_batching && (gb)->unit##_cycles < (cycles * 2))) {\
+    (gb)->unit##_state = state;\
+    return;\
+}\
+} while (0)
+
+#define GB_BATCHED_CYCLES(gb, unit) ((gb)->unit##_cycles / __state_machine_divisor)
 
 #define GB_STATE_MACHINE(gb, unit, cycles, divisor) \
 static const int __state_machine_divisor = divisor;\
@@ -43,6 +54,10 @@ if ((gb)->unit##_cycles <= 0) {\
 }\
 switch ((gb)->unit##_state)
 #endif
+
+#define GB_BATCHABLE_STATE_MACHINE(gb, unit, cycles, divisor, allow_batching) \
+const bool __state_machine_allow_batching = (allow_batching); \
+GB_STATE_MACHINE(gb, unit, cycles, divisor)
 
 #define GB_STATE(gb, unit, state) case state: goto unit##state
 

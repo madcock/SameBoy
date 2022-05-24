@@ -13,8 +13,10 @@ uint8_t GB_safe_read_memory(GB_gameboy_t *gb, uint16_t addr); // Without side ef
 void GB_write_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value);
 #ifdef GB_INTERNAL
 internal void GB_dma_run(GB_gameboy_t *gb);
+internal bool GB_is_dma_active(GB_gameboy_t *gb);
 internal void GB_hdma_run(GB_gameboy_t *gb);
 internal void GB_trigger_oam_bug(GB_gameboy_t *gb, uint16_t address);
+internal uint8_t GB_read_oam(GB_gameboy_t *gb, uint8_t addr);
 #endif
 
 #endif /* memory_h */

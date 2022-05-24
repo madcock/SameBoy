@@ -155,12 +155,20 @@ static const char *value_to_string(GB_gameboy_t *gb, uint16_t value, bool prefer
     return output;
 }
 
+static GB_symbol_map_t *get_symbol_map(GB_gameboy_t *gb, uint16_t bank)
+{
+    if (bank >= gb->n_symbol_maps) {
+        return NULL;
+    }
+    return gb->bank_symbols[bank];
+}
+
 static const char *debugger_value_to_string(GB_gameboy_t *gb, value_t value, bool prefer_name)
 {
     if (!value.has_bank) return value_to_string(gb, value.value, prefer_name);
 
     static __thread char output[256];
-    const GB_bank_symbol_t *symbol = GB_map_find_symbol(gb->bank_symbols[value.bank], value.value);
+    const GB_bank_symbol_t *symbol = GB_map_find_symbol(get_symbol_map(gb, value.bank), value.value);
 
     if (symbol && (value.value - symbol->addr > 0x1000 || symbol->addr == 0) ) {
         symbol = NULL;
@@ -911,13 +919,14 @@ static char *symbol_completer(GB_gameboy_t *gb, const char *string, uintptr_t *_
     
     size_t length = strlen(symbol_prefix);
     while (context->bank < 0x200) {
-        if (gb->bank_symbols[context->bank] == NULL ||
-            context->symbol >= gb->bank_symbols[context->bank]->n_symbols) {
+        GB_symbol_map_t *map = get_symbol_map(gb, context->bank);
+        if (map == NULL ||
+            context->symbol >= map->n_symbols) {
             context->bank++;
             context->symbol = 0;
             continue;
         }
-        const char *candidate = gb->bank_symbols[context->bank]->symbols[context->symbol++].name;
+        const char *candidate = map->symbols[context->symbol++].name;
         if (memcmp(symbol_prefix, candidate, length) == 0) {
             return strdup(candidate + length);
         }
@@ -1537,15 +1546,19 @@ static bool mbc(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugg
         }
         else {
             static const char *const mapper_names[] = {
-                [GB_MBC1] = "MBC1",
-                [GB_MBC2] = "MBC2",
-                [GB_MBC3] = "MBC3",
-                [GB_MBC5] = "MBC5",
-                [GB_MBC7] = "MBC7",
-                [GB_HUC1] = "HUC-1",
-                [GB_HUC3] = "HUC-3",
+                [GB_MBC1]  = "MBC1",
+                [GB_MBC2]  = "MBC2",
+                [GB_MBC3]  = "MBC3",
+                [GB_MBC5]  = "MBC5",
+                [GB_MBC7]  = "MBC7",
+                [GB_MMM01] = "MMM01",
+                [GB_HUC1]  = "HUC-1",
+                [GB_HUC3]  = "HUC-3",
             };
             GB_log(gb, "%s\n", mapper_names[cartridge->mbc_type]);
+        }
+        if (cartridge->mbc_type == GB_MMM01 || cartridge->mbc_type == GB_MBC1) {
+            GB_log(gb, "Current mapped ROM0 bank: %x\n", gb->mbc_rom0_bank);
         }
         GB_log(gb, "Current mapped ROM bank: %x\n", gb->mbc_rom_bank);
         if (cartridge->has_ram) {
@@ -1650,6 +1663,29 @@ static bool palettes(GB_gameboy_t *gb, char *arguments, char *modifiers, const d
     return true;
 }
 
+static bool dma(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugger_command_t *command)
+{
+    NO_MODIFIERS
+    if (strlen(lstrip(arguments))) {
+        print_usage(gb, command);
+        return true;
+    }
+    
+    if (!GB_is_dma_active(gb)) {
+        GB_log(gb, "DMA is inactive\n");
+        return true;
+    }
+    
+    if (gb->dma_current_dest == 0xFF) {
+        GB_log(gb, "DMA warming up\n"); // Shouldn't actually happen, as it only lasts 2 T-cycles
+        return true;
+    }
+    
+    GB_log(gb, "Next DMA write: [$FE%02X] = [$%04X]\n", gb->dma_current_dest, gb->dma_current_src);
+    
+    return true;
+}
+
 static bool lcd(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugger_command_t *command)
 {
     NO_MODIFIERS
@@ -1691,8 +1727,13 @@ static bool lcd(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugg
         GB_log(gb, "Glitched line 0 OAM mode (%d cycles to next event)\n", -gb->display_cycles / 2);
     }
     else if (gb->mode_for_interrupt == 3) {
-        signed pixel = gb->position_in_line > 160? (int8_t) gb->position_in_line : gb->position_in_line;
-        GB_log(gb, "Rendering pixel (%d/160)\n", pixel);
+        if (((uint8_t)(gb->position_in_line + 16) < 8)) {
+            GB_log(gb, "Adjusting for scrolling (%d/%d)\n", gb->position_in_line & 7, gb->io_registers[GB_IO_SCX] & 7);
+        }
+        else {
+            signed pixel = gb->position_in_line > 160? (int8_t) gb->position_in_line : gb->position_in_line;
+            GB_log(gb, "Rendering pixel (%d/160)\n", pixel);
+        }
     }
     else {
         GB_log(gb, "Sleeping (%d cycles to next event)\n", -gb->display_cycles / 2);
@@ -1708,54 +1749,60 @@ static bool lcd(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugg
 static bool apu(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugger_command_t *command)
 {
     NO_MODIFIERS
-    if (strlen(lstrip(arguments))) {
-        print_usage(gb, command);
-        return true;
-    }
-
-
-    GB_log(gb, "Current state: ");
-    if (!gb->apu.global_enable) {
-        GB_log(gb, "Disabled\n");
-    }
-    else {
-        GB_log(gb, "Enabled\n");
-        for (uint8_t channel = 0; channel < GB_N_CHANNELS; channel++) {
-            GB_log(gb, "CH%u is %s, DAC %s; current sample = 0x%x\n", channel + 1,
-                gb->apu.is_active[channel] ? "active  " : "inactive",
-                GB_apu_is_DAC_enabled(gb, channel) ? "active  " : "inactive",
-                gb->apu.samples[channel]);
+    const char *stripped = lstrip(arguments);
+    if (strlen(stripped)) {
+        if (stripped[0] != 0 && (stripped[0] < '1' || stripped[0] > '5')) {
+            print_usage(gb, command);
+            return true;
         }
     }
 
-    GB_log(gb, "SO1 (left output):  volume %u,", gb->io_registers[GB_IO_NR50] & 0x07);
-    if (gb->io_registers[GB_IO_NR51] & 0x0f) {
-        for (uint8_t channel = 0, mask = 0x01; channel < GB_N_CHANNELS; channel++, mask <<= 1) {
-            if (gb->io_registers[GB_IO_NR51] & mask) {
-                GB_log(gb, " CH%u", channel + 1);
+    if (stripped[0] == 0 || stripped[0] == '5') {
+        GB_log(gb, "Current state: ");
+        if (!gb->apu.global_enable) {
+            GB_log(gb, "Disabled\n");
+        }
+        else {
+            GB_log(gb, "Enabled\n");
+            for (uint8_t channel = 0; channel < GB_N_CHANNELS; channel++) {
+                GB_log(gb, "CH%u is %s, DAC %s; current sample = 0x%x\n", channel + 1,
+                    gb->apu.is_active[channel] ? "active  " : "inactive",
+                    GB_apu_is_DAC_enabled(gb, channel) ? "active  " : "inactive",
+                    gb->apu.samples[channel]);
             }
         }
-    }
-    else {
-        GB_log(gb, " no channels");
-    }
-    GB_log(gb, "%s\n", gb->io_registers[GB_IO_NR50] & 0x80 ? " VIN": "");
 
-    GB_log(gb, "SO2 (right output): volume %u,", gb->io_registers[GB_IO_NR50] & 0x70 >> 4);
-    if (gb->io_registers[GB_IO_NR51] & 0xf0) {
-        for (uint8_t channel = 0, mask = 0x10; channel < GB_N_CHANNELS; channel++, mask <<= 1) {
-            if (gb->io_registers[GB_IO_NR51] & mask) {
-                GB_log(gb, " CH%u", channel + 1);
+        GB_log(gb, "SO1 (left output):  volume %u,", gb->io_registers[GB_IO_NR50] & 0x07);
+        if (gb->io_registers[GB_IO_NR51] & 0x0F) {
+            for (uint8_t channel = 0, mask = 0x01; channel < GB_N_CHANNELS; channel++, mask <<= 1) {
+                if (gb->io_registers[GB_IO_NR51] & mask) {
+                    GB_log(gb, " CH%u", channel + 1);
+                }
             }
         }
+        else {
+            GB_log(gb, " no channels");
+        }
+        GB_log(gb, "%s\n", gb->io_registers[GB_IO_NR50] & 0x80 ? " VIN": "");
+
+        GB_log(gb, "SO2 (right output): volume %u,", gb->io_registers[GB_IO_NR50] & 0x70 >> 4);
+        if (gb->io_registers[GB_IO_NR51] & 0xF0) {
+            for (uint8_t channel = 0, mask = 0x10; channel < GB_N_CHANNELS; channel++, mask <<= 1) {
+                if (gb->io_registers[GB_IO_NR51] & mask) {
+                    GB_log(gb, " CH%u", channel + 1);
+                }
+            }
+        }
+        else {
+            GB_log(gb, " no channels");
+        }
+        GB_log(gb, "%s\n", gb->io_registers[GB_IO_NR50] & 0x80 ? " VIN": "");
     }
-    else {
-        GB_log(gb, " no channels");
-    }
-    GB_log(gb, "%s\n", gb->io_registers[GB_IO_NR50] & 0x80 ? " VIN": "");
 
 
     for (uint8_t channel = GB_SQUARE_1; channel <= GB_SQUARE_2; channel++) {
+        if (stripped[0] != 0 && stripped[0] != ('1') + channel) continue;
+        
         GB_log(gb, "\nCH%u:\n", channel + 1);
         GB_log(gb, "    Current volume: %u, current sample length: %u APU ticks (next in %u ticks)\n",
              gb->apu.square_channels[channel].current_volume,
@@ -1795,50 +1842,53 @@ static bool apu(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugg
         }
     }
 
+    if (stripped[0] == 0 || stripped[0] == '3') {
+        GB_log(gb, "\nCH3:\n");
+        GB_log(gb, "    Wave:");
+        for (uint8_t i = 0; i < 16; i++) {
+            GB_log(gb, "%s%X", i % 2? "" : " ", gb->io_registers[GB_IO_WAV_START + i] >> 4);
+            GB_log(gb, "%X", gb->io_registers[GB_IO_WAV_START + i] & 0xF);
+        }
+        GB_log(gb, "\n");
+        GB_log(gb, "    Current position: %u\n", gb->apu.wave_channel.current_sample_index);
 
-    GB_log(gb, "\nCH3:\n");
-    GB_log(gb, "    Wave:");
-    for (uint8_t i = 0; i < 16; i++) {
-        GB_log(gb, "%s%X", i % 2? "" : " ", gb->io_registers[GB_IO_WAV_START + i] >> 4);
-        GB_log(gb, "%X", gb->io_registers[GB_IO_WAV_START + i] & 0xF);
-    }
-    GB_log(gb, "\n");
-    GB_log(gb, "    Current position: %u\n", gb->apu.wave_channel.current_sample_index);
+        GB_log(gb, "    Volume %s (right-shifted %u times)\n",
+               gb->apu.wave_channel.shift > 4? "" : (const char *[]){"100%", "50%", "25%", "", "muted"}[gb->apu.wave_channel.shift],
+               gb->apu.wave_channel.shift);
 
-    GB_log(gb, "    Volume %s (right-shifted %u times)\n",
-           gb->apu.wave_channel.shift > 4? "" : (const char *[]){"100%", "50%", "25%", "", "muted"}[gb->apu.wave_channel.shift],
-           gb->apu.wave_channel.shift);
+        GB_log(gb, "    Current sample length: %u APU ticks (next in %u ticks)\n",
+            gb->apu.wave_channel.sample_length ^ 0x7FF,
+            gb->apu.wave_channel.sample_countdown);
 
-    GB_log(gb, "    Current sample length: %u APU ticks (next in %u ticks)\n",
-        gb->apu.wave_channel.sample_length ^ 0x7ff,
-        gb->apu.wave_channel.sample_countdown);
-
-    if (gb->apu.wave_channel.length_enabled) {
-        GB_log(gb, "    Channel will end in %u 256 Hz ticks\n",
-            gb->apu.wave_channel.pulse_length);
-    }
-
-
-    GB_log(gb, "\nCH4:\n");
-    GB_log(gb, "    Current volume: %u, current internal counter: 0x%04x (next increase in %u ticks)\n",
-        gb->apu.noise_channel.current_volume,
-        gb->apu.noise_channel.counter,
-        gb->apu.noise_channel.counter_countdown);
-
-    GB_log(gb, "    %u 256 Hz ticks till next volume %screase (out of %u)\n",
-        gb->apu.noise_channel.volume_countdown,
-        gb->io_registers[GB_IO_NR42] & 8 ? "in" : "de",
-        gb->io_registers[GB_IO_NR42] & 7);
-
-    GB_log(gb, "    LFSR in %u-step mode, current value ",
-        gb->apu.noise_channel.narrow? 7 : 15);
-    for (uint16_t lfsr = gb->apu.noise_channel.lfsr, i = 15; i--; lfsr <<= 1) {
-        GB_log(gb, "%u%s", (lfsr >> 14) & 1, i%4 ? "" : " ");
+        if (gb->apu.wave_channel.length_enabled) {
+            GB_log(gb, "    Channel will end in %u 256 Hz ticks\n",
+                gb->apu.wave_channel.pulse_length);
+        }
     }
 
-    if (gb->apu.noise_channel.length_enabled) {
-        GB_log(gb, "    Channel will end in %u 256 Hz ticks\n",
-            gb->apu.noise_channel.pulse_length);
+
+    if (stripped[0] == 0 || stripped[0] == '4') {
+        GB_log(gb, "\nCH4:\n");
+        GB_log(gb, "    Current volume: %u, current internal counter: 0x%04x (next increase in %u ticks)\n",
+            gb->apu.noise_channel.current_volume,
+            gb->apu.noise_channel.counter,
+            gb->apu.noise_channel.counter_countdown);
+
+        GB_log(gb, "    %u 256 Hz ticks till next volume %screase (out of %u)\n",
+            gb->apu.noise_channel.volume_countdown,
+            gb->io_registers[GB_IO_NR42] & 8 ? "in" : "de",
+            gb->io_registers[GB_IO_NR42] & 7);
+
+        GB_log(gb, "    LFSR in %u-step mode, current value ",
+            gb->apu.noise_channel.narrow? 7 : 15);
+        for (uint16_t lfsr = gb->apu.noise_channel.lfsr, i = 15; i--; lfsr <<= 1) {
+            GB_log(gb, "%u%s", (lfsr >> 14) & 1, i%4 ? "" : " ");
+        }
+
+        if (gb->apu.noise_channel.length_enabled) {
+            GB_log(gb, "    Channel will end in %u 256 Hz ticks\n",
+                gb->apu.noise_channel.pulse_length);
+        }
     }
 
 
@@ -1878,9 +1928,9 @@ static bool wave(GB_gameboy_t *gb, char *arguments, char *modifiers, const debug
                 break;
         }
     }
-    mask = (0xf << (shift_amount - 1)) & 0xf;
+    mask = (0xF << (shift_amount - 1)) & 0xF;
 
-    for (int8_t cur_val = 0xf & mask; cur_val >= 0; cur_val -= shift_amount) {
+    for (int8_t cur_val = 0xF & mask; cur_val >= 0; cur_val -= shift_amount) {
         for (uint8_t i = 0; i < 32; i++) {
             uint8_t sample = i & 1?
             (gb->io_registers[GB_IO_WAV_START + i / 2] & 0xF) :
@@ -1901,6 +1951,8 @@ static bool wave(GB_gameboy_t *gb, char *arguments, char *modifiers, const debug
 static bool undo(GB_gameboy_t *gb, char *arguments, char *modifiers, const debugger_command_t *command)
 {
     NO_MODIFIERS
+    STOPPED_ONLY
+    
     if (strlen(lstrip(arguments))) {
         print_usage(gb, command);
         return true;
@@ -1931,22 +1983,23 @@ static const debugger_command_t commands[] = {
     {"next", 1, next, "Run the next instruction, skipping over function calls"},
     {"step", 1, step, "Run the next instruction, stepping into function calls"},
     {"finish", 1, finish, "Run until the current function returns"},
-    {"undo", 1, undo, "Reverts the last command"},
-    {"backtrace", 2, backtrace, "Displays the current call stack"},
+    {"undo", 1, undo, "Revert the last command"},
+    {"backtrace", 2, backtrace, "Display the current call stack"},
     {"bt", 2, }, /* Alias */
     {"sld", 3, stack_leak_detection, "Like finish, but stops if a stack leak is detected"},
-    {"ticks", 2, ticks, "Displays the number of CPU ticks since the last time 'ticks' was" HELP_NEWLINE
+    {"ticks", 2, ticks, "Display the number of CPU ticks since the last time 'ticks' was" HELP_NEWLINE
                         "used"},
     {"registers", 1, registers, "Print values of processor registers and other important registers"},
-    {"cartridge", 2, mbc, "Displays information about the MBC and cartridge"},
+    {"cartridge", 2, mbc, "Display information about the MBC and cartridge"},
     {"mbc", 3, }, /* Alias */
-    {"apu", 3, apu, "Displays information about the current state of the audio chip"},
-    {"wave", 3, wave, "Prints a visual representation of the wave RAM." HELP_NEWLINE
+    {"apu", 3, apu, "Display information about the current state of the audio processing unit", "[channel (1-4, 5 for NR5x)]"},
+    {"wave", 3, wave, "Print a visual representation of the wave RAM." HELP_NEWLINE
                       "Modifiers can be used for a (f)ull print (the default)," HELP_NEWLINE
         "a more (c)ompact one, or a one-(l)iner", "", "(f|c|l)", .modifiers_completer = wave_completer},
-    {"lcd", 3, lcd, "Displays information about the current state of the LCD controller"},
-    {"palettes", 3, palettes, "Displays the current CGB palettes"},
-    {"softbreak", 2, softbreak, "Enables or disables software breakpoints", "(on|off)", .argument_completer = on_off_completer},
+    {"lcd", 3, lcd, "Display information about the current state of the LCD controller"},
+    {"palettes", 3, palettes, "Display the current CGB palettes"},
+    {"dma", 3, dma, "Display the current OAM DMA status"},
+    {"softbreak", 2, softbreak, "Enable or disables software breakpoints", "(on|off)", .argument_completer = on_off_completer},
     {"breakpoint", 1, breakpoint, "Add a new breakpoint at the specified address/expression" HELP_NEWLINE
                                   "Can also modify the condition of existing breakpoints." HELP_NEWLINE
                                   "If the j modifier is used, the breakpoint will occur just before" HELP_NEWLINE
@@ -2196,6 +2249,9 @@ bool GB_debugger_execute_command(GB_gameboy_t *gb, char *input)
     if (!input[0]) {
         return true;
     }
+    
+    GB_display_sync(gb);
+    GB_apu_run(gb, true);
 
     char *command_string = input;
     char *arguments = strchr(input, ' ');
@@ -2416,7 +2472,12 @@ void GB_debugger_handle_async_commands(GB_gameboy_t *gb)
 
 void GB_debugger_add_symbol(GB_gameboy_t *gb, uint16_t bank, uint16_t address, const char *symbol)
 {
-    bank &= 0x1FF;
+    if (bank >= gb->n_symbol_maps) {
+        gb->bank_symbols = realloc(gb->bank_symbols, (bank + 1) * sizeof(*gb->bank_symbols));
+        while (bank >= gb->n_symbol_maps) {
+            gb->bank_symbols[gb->n_symbol_maps++] = NULL;
+        }
+    }
 
     if (!gb->bank_symbols[bank]) {
         gb->bank_symbols[bank] = GB_map_alloc();
@@ -2458,7 +2519,7 @@ void GB_debugger_load_symbol_file(GB_gameboy_t *gb, const char *path)
 
 void GB_debugger_clear_symbols(GB_gameboy_t *gb)
 {
-    for (unsigned i = sizeof(gb->bank_symbols) / sizeof(gb->bank_symbols[0]); i--;) {
+    for (unsigned i = gb->n_symbol_maps; i--;) {
         if (gb->bank_symbols[i]) {
             GB_map_free(gb->bank_symbols[i]);
             gb->bank_symbols[i] = 0;
@@ -2471,15 +2532,20 @@ void GB_debugger_clear_symbols(GB_gameboy_t *gb)
             gb->reversed_symbol_map.buckets[i] = next;
         }
     }
+    gb->n_symbol_maps = 0;
+    if (gb->bank_symbols) {
+        free(gb->bank_symbols);
+        gb->bank_symbols = NULL;
+    }
 }
 
 const GB_bank_symbol_t *GB_debugger_find_symbol(GB_gameboy_t *gb, uint16_t addr)
 {
     uint16_t bank = bank_for_addr(gb, addr);
 
-    const GB_bank_symbol_t *symbol = GB_map_find_symbol(gb->bank_symbols[bank], addr);
+    const GB_bank_symbol_t *symbol = GB_map_find_symbol(get_symbol_map(gb, bank), addr);
     if (symbol) return symbol;
-    if (bank != 0) return GB_map_find_symbol(gb->bank_symbols[0], addr); /* Maybe the symbol incorrectly uses bank 0? */
+    if (bank != 0) return GB_map_find_symbol(get_symbol_map(gb, 0), addr); /* Maybe the symbol incorrectly uses bank 0? */
 
     return NULL;
 }

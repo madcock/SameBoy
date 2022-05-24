@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include "defs.h"
 
 #ifdef GB_INTERNAL
@@ -57,7 +58,7 @@ typedef void (*GB_sample_callback_t)(GB_gameboy_t *gb, GB_sample_t *sample);
 typedef struct
 {
     bool global_enable;
-    uint8_t apu_cycles;
+    uint16_t apu_cycles;
 
     uint8_t samples[GB_N_CHANNELS];
     bool is_active[GB_N_CHANNELS];
@@ -88,6 +89,8 @@ typedef struct
         uint16_t sample_length; // From NRX3, NRX4, in APU ticks
         bool length_enabled; // NRX4
         GB_envelope_clock_t envelope_clock;
+        uint8_t delay; // Hack for CGB D/E phantom step due to how sample_countdown is implemented in SameBoy
+        bool did_tick;
     } square_channels[2];
 
     struct {
@@ -140,11 +143,16 @@ typedef enum {
     GB_HIGHPASS_MAX
 } GB_highpass_mode_t;
 
+typedef enum {
+    GB_AUDIO_FORMAT_RAW, // Native endian
+    GB_AUDIO_FORMAT_AIFF, // Native endian
+    GB_AUDIO_FORMAT_WAV,
+} GB_audio_format_t;
+
 typedef struct {
     unsigned sample_rate;
 
-    double sample_cycles; // In 8 MHz units
-    double cycles_per_sample;
+    unsigned sample_cycles; // Counts by sample_rate until it reaches the clock frequency
 
     // Samples are NOT normalized to MAX_CH_AMP * 4 at this stage!
     unsigned cycles_since_render;
@@ -159,17 +167,22 @@ typedef struct {
     
     GB_sample_callback_t sample_callback;
     
-    bool rate_set_in_clocks;
     double interference_volume;
     double interference_highpass;
+    
+    FILE *output_file;
+    GB_audio_format_t output_format;
+    int output_error;
 } GB_apu_output_t;
 
 void GB_set_sample_rate(GB_gameboy_t *gb, unsigned sample_rate);
+unsigned GB_get_sample_rate(GB_gameboy_t *gb);
 void GB_set_sample_rate_by_clocks(GB_gameboy_t *gb, double cycles_per_sample); /* Cycles are in 8MHz units */
 void GB_set_highpass_filter_mode(GB_gameboy_t *gb, GB_highpass_mode_t mode);
 void GB_set_interference_volume(GB_gameboy_t *gb, double volume);
 void GB_apu_set_sample_callback(GB_gameboy_t *gb, GB_sample_callback_t callback);
-
+int GB_start_audio_recording(GB_gameboy_t *gb, const char *path, GB_audio_format_t format);
+int GB_stop_audio_recording(GB_gameboy_t *gb);
 #ifdef GB_INTERNAL
 internal bool GB_apu_is_DAC_enabled(GB_gameboy_t *gb, unsigned index);
 internal void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value);
@@ -177,8 +190,7 @@ internal uint8_t GB_apu_read(GB_gameboy_t *gb, uint8_t reg);
 internal void GB_apu_div_event(GB_gameboy_t *gb);
 internal void GB_apu_div_secondary_event(GB_gameboy_t *gb);
 internal void GB_apu_init(GB_gameboy_t *gb);
-internal void GB_apu_run(GB_gameboy_t *gb);
-internal void GB_apu_update_cycles_per_sample(GB_gameboy_t *gb);
+internal void GB_apu_run(GB_gameboy_t *gb, bool force);
 #endif
 
 #endif /* apu_h */

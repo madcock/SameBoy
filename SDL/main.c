@@ -622,7 +622,7 @@ restart:
     {
         [MODEL_DMG] = GB_MODEL_DMG_B,
         [MODEL_CGB] = GB_MODEL_CGB_E,
-        [MODEL_AGB] = GB_MODEL_AGB,
+        [MODEL_AGB] = GB_MODEL_AGB_A,
         [MODEL_MGB] = GB_MODEL_MGB,
         [MODEL_SGB] = (GB_model_t [])
         {
@@ -757,6 +757,11 @@ static void save_configuration(void)
     }
 }
 
+static void stop_recording(void)
+{
+    GB_stop_audio_recording(&gb);
+}
+
 static bool get_arg_flag(const char *flag, int *argc, char **argv)
 {
     for (unsigned i = 1; i < *argc; i++) {
@@ -831,7 +836,7 @@ int main(int argc, char **argv)
         configuration.highpass_mode %= GB_HIGHPASS_MAX;
         configuration.model %= MODEL_MAX;
         configuration.sgb_revision %= SGB_MAX;
-        configuration.dmg_palette %= 3;
+        configuration.dmg_palette %= 4;
         configuration.border_mode %= GB_BORDER_ALWAYS + 1;
         configuration.rumble_mode %= GB_RUMBLE_ALL_GAMES + 1;
         configuration.color_temperature %= 21;
@@ -847,6 +852,7 @@ int main(int argc, char **argv)
     }
     
     atexit(save_configuration);
+    atexit(stop_recording);
     
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);

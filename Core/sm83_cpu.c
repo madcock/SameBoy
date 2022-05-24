@@ -23,6 +23,7 @@ typedef enum {
     GB_CONFLICT_WX,
     GB_CONFLICT_CGB_LCDC,
     GB_CONFLICT_NR10,
+    GB_CONFLICT_CGB_SCX,
 } conflict_t;
 
 /* Todo: How does double speed mode affect these? */
@@ -35,9 +36,7 @@ static const conflict_t cgb_conflict_map[0x80] = {
     [GB_IO_OBP0] = GB_CONFLICT_PALETTE_CGB,
     [GB_IO_OBP1] = GB_CONFLICT_PALETTE_CGB,
     [GB_IO_NR10] = GB_CONFLICT_NR10,
-    [GB_IO_SCX] = GB_CONFLICT_WRITE_CPU, // TODO: Similar to BGP, there's some time travelling involved
-
-    /* Todo: most values not verified, and probably differ between revisions */
+    [GB_IO_SCX] = GB_CONFLICT_CGB_SCX,
 };
 
 /* Todo: verify on an MGB */
@@ -145,6 +144,7 @@ static void cycle_write(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
         /* The DMG STAT-write bug is basically the STAT register being read as FF for a single T-cycle */
         case GB_CONFLICT_STAT_DMG:
             GB_advance_cycles(gb, gb->pending_cycles);
+            GB_display_sync(gb);
             /* State 7 is the edge between HBlank and OAM mode, and it behaves a bit weird.
              The OAM interrupt seems to be blocked by HBlank interrupts in that case, despite
              the timing not making much sense for that.
@@ -206,7 +206,7 @@ static void cycle_write(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
             
             uint8_t old_value = GB_read_memory(gb, addr);
             GB_advance_cycles(gb, gb->pending_cycles - 2);
-            
+            GB_display_sync(gb);
             if (gb->model != GB_MODEL_MGB && gb->position_in_line == 0 && (old_value & 2) && !(value & 2)) {
                 old_value &= ~2;
             }
@@ -277,6 +277,7 @@ static void cycle_write(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
             GB_advance_cycles(gb, gb->pending_cycles);
             if (gb->model <= GB_MODEL_CGB_C) {
                 // TODO: Double speed mode? This logic is also a bit weird, it needs more tests
+                GB_apu_run(gb, true);
                 if (gb->apu.square_sweep_calculate_countdown > 3 && gb->apu.enable_zombie_calculate_stepping) {
                     gb->apu.square_sweep_calculate_countdown -= 2;
                 }
@@ -288,6 +289,19 @@ static void cycle_write(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
             }
             GB_write_memory(gb, addr, value);
             gb->pending_cycles = 4;
+            break;
+            
+        case GB_CONFLICT_CGB_SCX:
+            if (gb->cgb_double_speed) {
+                GB_advance_cycles(gb, gb->pending_cycles - 2);
+                GB_write_memory(gb, addr, value);
+                gb->pending_cycles = 6;
+            }
+            else {
+                GB_advance_cycles(gb, gb->pending_cycles);
+                GB_write_memory(gb, addr, value);
+                gb->pending_cycles = 4;
+            }
             break;
     }
     gb->address_bus = addr;
@@ -354,6 +368,9 @@ static void enter_stop_mode(GB_gameboy_t *gb)
 static void leave_stop_mode(GB_gameboy_t *gb)
 {
     gb->stopped = false;
+    // TODO: verify this
+    gb->dma_cycles = 4;
+    GB_dma_run(gb);
     gb->oam_ppu_blocked = false;
     gb->vram_ppu_blocked = false;
     gb->cgb_palettes_ppu_blocked = false;
@@ -372,6 +389,9 @@ static void stop(GB_gameboy_t *gb, uint8_t opcode)
     bool interrupt_pending = (gb->interrupt_enable & gb->io_registers[GB_IO_IF] & 0x1F);
     // When entering with IF&IE, the 2nd byte of STOP is actually executed
     if (!exit_by_joyp) {
+        if (!immediate_exit) {
+            GB_dma_run(gb);
+        }
         enter_stop_mode(gb);
     }
     
@@ -414,6 +434,7 @@ static void stop(GB_gameboy_t *gb, uint8_t opcode)
     if (immediate_exit) {
         leave_stop_mode(gb);
         if (!interrupt_pending) {
+            GB_dma_run(gb);
             gb->halted = true;
             gb->just_halted = true;
         }
@@ -658,8 +679,8 @@ static bool condition_code(GB_gameboy_t *gb, uint8_t opcode)
             return !(gb->af & GB_CARRY_FLAG);
         case 3:
             return (gb->af & GB_CARRY_FLAG);
+        nodefault;
     }
-    __builtin_unreachable();
 
     return false;
 }
@@ -1004,7 +1025,6 @@ static void halt(GB_gameboy_t *gb, uint8_t opcode)
     gb->pending_cycles = 0;
     GB_advance_cycles(gb, 4);
     
-    gb->halted = true;
     /* Despite what some online documentations say, the HALT bug also happens on a CGB, in both CGB and DMG modes. */
     if (((gb->interrupt_enable & gb->io_registers[GB_IO_IF] & 0x1F) != 0)) {
         if (gb->ime) {
@@ -1015,6 +1035,9 @@ static void halt(GB_gameboy_t *gb, uint8_t opcode)
             gb->halted = false;
             gb->halt_bug = true;
         }
+    }
+    else {
+        gb->halted = true;
     }
     gb->just_halted = true;
 }
@@ -1357,7 +1380,7 @@ static void rlc_r(GB_gameboy_t *gb, uint8_t opcode)
     if (carry) {
         gb->af |= GB_CARRY_FLAG;
     }
-    if (!(value << 1)) {
+    if (value == 0) {
         gb->af |= GB_ZERO_FLAG;
     }
 }
@@ -1571,10 +1594,6 @@ static opcode_t *opcodes[256] = {
 };
 void GB_cpu_run(GB_gameboy_t *gb)
 {
-    if (gb->hdma_on) {
-        GB_advance_cycles(gb, 4);
-        return;
-    }
     if (gb->stopped) {
         GB_timing_sync(gb);
         GB_advance_cycles(gb, 4);
@@ -1612,16 +1631,27 @@ void GB_cpu_run(GB_gameboy_t *gb)
     /* Wake up from HALT mode without calling interrupt code. */
     if (gb->halted && !effective_ime && interrupt_queue) {
         gb->halted = false;
+        if (gb->hdma_on_hblank && (gb->io_registers[GB_IO_STAT] & 3) == 0) {
+            gb->hdma_on = true;
+        }
+        gb->dma_cycles = 4;
+        GB_dma_run(gb);
         gb->speed_switch_halt_countdown = 0;
     }
     
     /* Call interrupt */
     else if (effective_ime && interrupt_queue) {
         gb->halted = false;
+        if (gb->hdma_on_hblank && (gb->io_registers[GB_IO_STAT] & 3) == 0) {
+            gb->hdma_on = true;
+        }
+        // TODO: verify the timing!
+        gb->dma_cycles = 4;
+        GB_dma_run(gb);
         gb->speed_switch_halt_countdown = 0;
         uint16_t call_addr = gb->pc;
         
-        gb->last_opcode_read = cycle_read(gb, gb->pc++);
+        cycle_read(gb, gb->pc++);
         cycle_oam_bug_pc(gb);
         gb->pc--;
         GB_trigger_oam_bug(gb, gb->sp); /* Todo: test T-cycle timing */
@@ -1660,22 +1690,19 @@ void GB_cpu_run(GB_gameboy_t *gb)
     }
     /* Run mode */
     else if (!gb->halted) {
-        gb->last_opcode_read = cycle_read(gb, gb->pc++);
+        uint8_t opcode = gb->hdma_open_bus = cycle_read(gb, gb->pc++);
+        if (unlikely(gb->hdma_on)) {
+            GB_hdma_run(gb);
+        }
         if (unlikely(gb->execution_callback)) {
-            gb->execution_callback(gb, gb->pc - 1, gb->last_opcode_read);
+            gb->execution_callback(gb, gb->pc - 1, opcode);
         }
         if (unlikely(gb->halt_bug)) {
             gb->pc--;
             gb->halt_bug = false;
         }
-        opcodes[gb->last_opcode_read](gb, gb->last_opcode_read);
+        opcodes[opcode](gb, opcode);
     }
     
     flush_pending_cycles(gb);
-
-    if (gb->hdma_starting) {
-        gb->hdma_starting = false;
-        gb->hdma_on = true;
-        gb->hdma_cycles = -8;
-    }
 }
