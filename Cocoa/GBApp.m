@@ -1,10 +1,12 @@
-#import "AppDelegate.h"
+#import "GBApp.h"
 #include "GBButtons.h"
 #include "GBView.h"
+#include "Document.h"
 #include <Core/gb.h>
 #import <Carbon/Carbon.h>
 #import <JoyKit/JoyKit.h>
 #import <WebKit/WebKit.h>
+#import <mach-o/dyld.h>
 
 #define UPDATE_SERVER "https://sameboy.github.io"
 
@@ -16,10 +18,9 @@ static uint32_t color_to_int(NSColor *color)
            ((unsigned)(color.blueComponent * 0xFF));
 }
 
-@implementation AppDelegate
+@implementation GBApp
 {
-    NSWindow *preferences_window;
-    NSArray<NSView *> *preferences_tabs;
+    NSArray<NSView *> *_preferencesTabs;
     NSString *_lastVersion;
     NSString *_updateURL;
     NSURLSessionDownloadTask *_updateTask;
@@ -31,10 +32,15 @@ static uint32_t color_to_int(NSColor *color)
         UPDATE_FAILED,
     } _updateState;
     NSString *_downloadDirectory;
+    AuthorizationRef _auth;
+    bool _simulatingMenuEvent;
 }
 
 - (void) applicationDidFinishLaunching:(NSNotification *)notification
 {
+    // Refresh icon if launched via a software update
+    [NSApplication sharedApplication].applicationIconImage = [NSImage imageNamed:@"AppIcon"];
+    
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     for (unsigned i = 0; i < GBButtonCount; i++) {
         if ([[defaults objectForKey:button_to_preference_name(i, 0)] isKindOfClass:[NSString class]]) {
@@ -57,13 +63,14 @@ static uint32_t color_to_int(NSColor *color)
                                                               @"GBSlow-Motion": @(kVK_Shift),
 
                                                               @"GBFilter": @"NearestNeighbor",
-                                                              @"GBColorCorrection": @(GB_COLOR_CORRECTION_EMULATE_HARDWARE),
+                                                              @"GBColorCorrection": @(GB_COLOR_CORRECTION_MODERN_BALANCED),
                                                               @"GBHighpassFilter": @(GB_HIGHPASS_REMOVE_DC_OFFSET),
                                                               @"GBRewindLength": @(10),
                                                               @"GBFrameBlendingMode": @([defaults boolForKey:@"DisableFrameBlending"]? GB_FRAME_BLENDING_MODE_DISABLED : GB_FRAME_BLENDING_MODE_ACCURATE),
                                                               
                                                               @"GBDMGModel": @(GB_MODEL_DMG_B),
                                                               @"GBCGBModel": @(GB_MODEL_CGB_E),
+                                                              @"GBAGBModel": @(GB_MODEL_AGB_A),
                                                               @"GBSGBModel": @(GB_MODEL_SGB2),
                                                               @"GBRumbleMode": @(GB_RUMBLE_CARTRIDGE_ONLY),
                                                               
@@ -140,6 +147,8 @@ static uint32_t color_to_int(NSColor *color)
         JOYHatsEmulateButtonsKey: @YES,
     }];
     
+    [JOYController registerListener:self];
+    
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"GBNotificationsUsed"]) {
         [NSUserNotificationCenter defaultUserNotificationCenter].delegate = self;
     }
@@ -163,10 +172,10 @@ static uint32_t color_to_int(NSColor *color)
 
 - (IBAction)switchPreferencesTab:(id)sender
 {
-    for (NSView *view in preferences_tabs) {
+    for (NSView *view in _preferencesTabs) {
         [view removeFromSuperview];
     }
-    NSView *tab = preferences_tabs[[sender tag]];
+    NSView *tab = _preferencesTabs[[sender tag]];
     NSRect old = [_preferencesWindow frame];
     NSRect new = [_preferencesWindow frameRectForContentRect:tab.frame];
     new.origin.x = old.origin.x;
@@ -210,7 +219,7 @@ static uint32_t color_to_int(NSColor *color)
         [[NSBundle mainBundle] loadNibNamed:@"Preferences" owner:self topLevelObjects:&objects];
         NSToolbarItem *first_toolbar_item = [_preferencesWindow.toolbar.items firstObject];
         _preferencesWindow.toolbar.selectedItemIdentifier = [first_toolbar_item itemIdentifier];
-        preferences_tabs = @[self.emulationTab, self.graphicsTab, self.audioTab, self.controlsTab, self.updatesTab];
+        _preferencesTabs = @[self.emulationTab, self.graphicsTab, self.audioTab, self.controlsTab, self.updatesTab];
         [self switchPreferencesTab:first_toolbar_item];
         [_preferencesWindow center];
 #ifndef UPDATE_SUPPORT
@@ -363,8 +372,55 @@ static uint32_t color_to_int(NSColor *color)
     [self.updateWindow performClose:sender];
 }
 
+- (bool)executePath:(NSString *)path withArguments:(NSArray <NSString *> *)arguments
+{
+    if (!_auth) {
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = path;
+        task.arguments = arguments;
+        [task launch];
+        [task waitUntilExit];
+        return task.terminationStatus == 0 && task.terminationReason == NSTaskTerminationReasonExit;
+    }
+    
+    char *argv[arguments.count + 1];
+    argv[arguments.count] = NULL;
+    for (unsigned i = 0; i < arguments.count; i++) {
+        argv[i] = (char *)arguments[i].UTF8String;
+    }
+    
+    return AuthorizationExecuteWithPrivileges(_auth, path.UTF8String, kAuthorizationFlagDefaults, argv, NULL) == errAuthorizationSuccess;
+}
+
+- (void)deauthorize
+{
+    if (_auth) {
+        AuthorizationFree(_auth, kAuthorizationFlagDefaults);
+        _auth = nil;
+    }
+}
+
 - (IBAction)installUpdate:(id)sender
 {
+    bool needsAuthorization = false;
+    if ([self executePath:@"/usr/sbin/spctl" withArguments:@[@"--status"]]) { // Succeeds when GateKeeper is on
+        // GateKeeper is on, we need to --add ourselves as root, else we might get a GateKeeper crash
+        needsAuthorization = true;
+    }
+    else if (access(_dyld_get_image_name(0), W_OK)) {
+        // We don't have write access, so we need authorization to update as root
+        needsAuthorization = true;
+    }
+    
+    if (needsAuthorization && !_auth) {
+        AuthorizationCreate(NULL, kAuthorizationEmptyEnvironment, kAuthorizationFlagPreAuthorize | kAuthorizationFlagInteractionAllowed, &_auth);
+        // Make sure we can modify the bundle
+        if (![self executePath:@"/usr/sbin/chown" withArguments:@[@"-R", [NSString stringWithFormat:@"%d:%d", getuid(), getgid()], [NSBundle mainBundle].bundlePath]]) {
+            [self deauthorize];
+            return;
+        }
+    }
+    
     [self.updateProgressSpinner startAnimation:nil];
     self.updateProgressButton.title = @"Cancel";
     self.updateProgressButton.enabled = true;
@@ -383,8 +439,8 @@ static uint32_t color_to_int(NSColor *color)
                                                             appropriateForURL:[[NSBundle mainBundle] bundleURL]
                                                                        create:true
                                                                         error:nil] path];
-        NSTask *unzipTask;
         if (!_downloadDirectory) {
+            [self deauthorize];
             dispatch_sync(dispatch_get_main_queue(), ^{
                 self.updateProgressButton.enabled = false;
                 self.updateProgressLabel.stringValue = @"Failed to extract update.";
@@ -396,12 +452,14 @@ static uint32_t color_to_int(NSColor *color)
             return;
         }
         
+        NSTask *unzipTask;
         unzipTask = [[NSTask alloc] init];
         unzipTask.launchPath = @"/usr/bin/unzip";
         unzipTask.arguments = @[location.path, @"-d", _downloadDirectory];
         [unzipTask launch];
         [unzipTask waitUntilExit];
         if (unzipTask.terminationStatus != 0 || unzipTask.terminationReason != NSTaskTerminationReasonExit) {
+            [self deauthorize];
             [[NSFileManager defaultManager] removeItemAtPath:_downloadDirectory error:nil];
             dispatch_sync(dispatch_get_main_queue(), ^{
                 self.updateProgressButton.enabled = false;
@@ -446,6 +504,7 @@ static uint32_t color_to_int(NSColor *color)
         NSError *error = nil;
         [[NSFileManager defaultManager] moveItemAtPath:contentsPath toPath:contentsTempPath error:&error];
         if (error) {
+            [self deauthorize];
             [[NSFileManager defaultManager] removeItemAtPath:_downloadDirectory error:nil];
             _downloadDirectory = nil;
             dispatch_sync(dispatch_get_main_queue(), ^{
@@ -460,6 +519,7 @@ static uint32_t color_to_int(NSColor *color)
         }
         [[NSFileManager defaultManager] moveItemAtPath:updateContentsPath toPath:contentsPath error:&error];
         if (error) {
+            [self deauthorize];
             [[NSFileManager defaultManager] moveItemAtPath:contentsTempPath toPath:contentsPath error:nil];
             [[NSFileManager defaultManager] removeItemAtPath:_downloadDirectory error:nil];
             _downloadDirectory = nil;
@@ -504,6 +564,74 @@ static uint32_t color_to_int(NSColor *color)
             [self.updateProgressWindow close];
             break;
     }
+}
+
+- (void)orderFrontAboutPanel:(id)sender
+{
+    // NSAboutPanelOptionApplicationIcon is not available prior to 10.13, but the key is still there and working.
+    [[NSApplication sharedApplication] orderFrontStandardAboutPanelWithOptions:@{
+        @"ApplicationIcon": [NSImage imageNamed:@"Icon"]
+    }];
+}
+
+- (void)controller:(JOYController *)controller buttonChangedState:(JOYButton *)button
+{
+    if (!button.isPressed) return;
+    NSDictionary *mapping = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"JoyKitInstanceMapping"][controller.uniqueID];
+    if (!mapping) {
+        mapping = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"JoyKitNameMapping"][controller.deviceName];
+    }
+    
+    JOYButtonUsage usage = ((JOYButtonUsage)[mapping[n2s(button.uniqueID)] unsignedIntValue]) ?: -1;
+    if (!mapping && usage >= JOYButtonUsageGeneric0) {
+        usage = (const JOYButtonUsage[]){JOYButtonUsageY, JOYButtonUsageA, JOYButtonUsageB, JOYButtonUsageX}[(usage - JOYButtonUsageGeneric0) & 3];
+    }
+    
+    if (usage == GBJoyKitHotkey1 || usage == GBJoyKitHotkey2) {
+        if (_preferencesWindow && self.keyWindow == _preferencesWindow) {
+            return;
+        }
+        if (![[NSUserDefaults standardUserDefaults] boolForKey:@"GBAllowBackgroundControllers"] && !self.keyWindow) {
+            return;
+        }
+
+        NSString *keyEquivalent = [[NSUserDefaults standardUserDefaults] stringForKey:usage == GBJoyKitHotkey1? @"GBJoypadHotkey1" : @"GBJoypadHotkey2"];
+        NSEventModifierFlags flags = NSEventModifierFlagCommand;
+        if ([keyEquivalent hasPrefix:@"^"]) {
+            flags |= NSEventModifierFlagShift;
+            [keyEquivalent substringFromIndex:1];
+        }
+        _simulatingMenuEvent = true;
+        [[NSApplication sharedApplication] sendEvent:[NSEvent keyEventWithType:NSEventTypeKeyDown
+                                                                                 location:(NSPoint){0,}
+                                                                            modifierFlags:flags
+                                                                                timestamp:0
+                                                                             windowNumber:0
+                                                                                  context:NULL
+                                                                               characters:keyEquivalent
+                                                              charactersIgnoringModifiers:keyEquivalent
+                                                                                isARepeat:false
+                                                                                  keyCode:0]];
+        _simulatingMenuEvent = false;
+    }
+}
+
+- (NSWindow *)keyWindow
+{
+    NSWindow *ret = [super keyWindow];
+    if (!ret && _simulatingMenuEvent) {
+        ret = [(Document *)self.orderedDocuments.firstObject mainWindow];
+    }
+    return ret;
+}
+
+- (NSWindow *)mainWindow
+{
+    NSWindow *ret = [super mainWindow];
+    if (!ret && _simulatingMenuEvent) {
+        ret = [(Document *)self.orderedDocuments.firstObject mainWindow];
+    }
+    return ret;
 }
 
 - (void)dealloc

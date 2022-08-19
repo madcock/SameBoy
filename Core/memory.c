@@ -383,7 +383,7 @@ static uint8_t read_mbc_ram(GB_gameboy_t *gb, uint16_t addr)
         }
     }
     else if ((!gb->mbc_ram_enable) &&
-        gb->cartridge_type->mbc_subtype != GB_CAMERA &&
+        gb->cartridge_type->mbc_type != GB_CAMERA &&
         gb->cartridge_type->mbc_type != GB_HUC1 &&
         gb->cartridge_type->mbc_type != GB_HUC3) {
         return 0xFF;
@@ -414,8 +414,15 @@ static uint8_t read_mbc_ram(GB_gameboy_t *gb, uint16_t addr)
         return 0xFF;
     }
 
-    if (gb->cartridge_type->mbc_subtype == GB_CAMERA && gb->mbc_ram_bank == 0 && addr >= 0xA100 && addr < 0xAF00) {
-        return GB_camera_read_image(gb, addr - 0xA100);
+    if (gb->cartridge_type->mbc_type == GB_CAMERA) {
+        /* Forbid reading RAM while the camera is busy. */
+        if (gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] & 1) {
+            return 0;
+        }
+
+        if (gb->mbc_ram_bank == 0 && addr >= 0xA100 && addr < 0xAF00) {
+            return GB_camera_read_image(gb, addr - 0xA100);
+        }
     }
 
     uint8_t effective_bank = gb->mbc_ram_bank;
@@ -482,6 +489,7 @@ internal uint8_t GB_read_oam(GB_gameboy_t *gb, uint8_t addr)
     switch (gb->model) {
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB_A:
+        case GB_MODEL_GBP_A:
             return (addr & 0xF0) | (addr >> 4);
             
         case GB_MODEL_CGB_D:
@@ -620,6 +628,10 @@ static uint8_t read_high_memory(GB_gameboy_t *gb, uint16_t addr)
             case GB_IO_JOYP:
                 gb->joyp_accessed = true;
                 GB_timing_sync(gb);
+                if (unlikely(gb->joyp_switching_delay)) {
+                    return (gb->io_registers[addr & 0xFF] & ~0x30) | (gb->joyp_switch_value & 0x30);
+                }
+                return gb->io_registers[addr & 0xFF];
             case GB_IO_TMA:
             case GB_IO_LCDC:
             case GB_IO_SCY:
@@ -827,7 +839,16 @@ static void write_mbc(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                         value &= 7;
                     }
                     gb->mbc5.ram_bank = value;
-                    gb->camera_registers_mapped = (value & 0x10) && gb->cartridge_type->mbc_subtype == GB_CAMERA;
+                    break;
+            }
+            break;
+        case GB_CAMERA:
+            switch (addr & 0xF000) {
+                case 0x0000: case 0x1000: gb->mbc_ram_enable = (value & 0xF) == 0xA; break;
+                case 0x2000: case 0x3000: gb->mbc5.rom_bank_low   = value; break;
+                case 0x4000: case 0x5000:
+                    gb->mbc5.ram_bank = value;
+                    gb->camera_registers_mapped = (value & 0x10);
                     break;
             }
             break;
@@ -850,15 +871,12 @@ static void write_mbc(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 case 0x2000: case 0x3000:
                     if (!gb->mmm01.locked) {
                         gb->mmm01.rom_bank_mid = value >> 5;
-                        gb->mmm01.rom_bank_low = value;
                     }
-                    else {
-                        gb->mmm01.rom_bank_low &= (gb->mmm01.rom_bank_mask << 1);
-                        gb->mmm01.rom_bank_low |= ~(gb->mmm01.rom_bank_mask << 1) & value;
-                    }
+                    gb->mmm01.rom_bank_low &= (gb->mmm01.rom_bank_mask << 1);
+                    gb->mmm01.rom_bank_low |= ~(gb->mmm01.rom_bank_mask << 1) & value;
                     break;
                 case 0x4000: case 0x5000:
-                    gb->mmm01.ram_bank_low = value;
+                    gb->mmm01.ram_bank_low = value | ~gb->mmm01.ram_bank_mask;
                     if (!gb->mmm01.locked) {
                         gb->mmm01.ram_bank_high = value >> 2;
                         gb->mmm01.rom_bank_high = value >> 4;
@@ -866,7 +884,9 @@ static void write_mbc(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                     }
                     break;
                 case 0x6000: case 0x7000:
-                    gb->mmm01.mbc1_mode = (value & 1) && !gb->mmm01.mbc1_mode_disable;
+                    if (!gb->mmm01.mbc1_mode_disable) {
+                        gb->mmm01.mbc1_mode = (value & 1);
+                    }
                     if (!gb->mmm01.locked) {
                         gb->mmm01.rom_bank_mask = value >> 2;
                         gb->mmm01.multiplex_mode = value & 0x40;
@@ -879,7 +899,6 @@ static void write_mbc(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                 case 0x0000: case 0x1000: gb->huc1.ir_mode = (value & 0xF) == 0xE; break;
                 case 0x2000: case 0x3000: gb->huc1.bank_low  = value; break;
                 case 0x4000: case 0x5000: gb->huc1.bank_high = value; break;
-                case 0x6000: case 0x7000: gb->huc1.mode      = value; break;
             }
             break;
         case GB_HUC3:
@@ -1064,7 +1083,7 @@ static void write_mbc7_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                     gb->mbc7.eeprom_do = gb->mbc7.read_bits >> 15;
                     gb->mbc7.read_bits <<= 1;
                     gb->mbc7.read_bits |= 1;
-                    if (gb->mbc7.bits_countdown == 0) {
+                    if (gb->mbc7.argument_bits_left == 0) {
                         /* Not transferring extra bits for a command*/
                         gb->mbc7.eeprom_command <<= 1;
                         gb->mbc7.eeprom_command |= gb->mbc7.eeprom_di;
@@ -1095,7 +1114,7 @@ static void write_mbc7_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                                     if (gb->mbc7.eeprom_write_enabled) {
                                         ((uint16_t *)gb->mbc_ram)[gb->mbc7.eeprom_command & 0x7F] = 0;
                                     }
-                                    gb->mbc7.bits_countdown = 16;
+                                    gb->mbc7.argument_bits_left = 16;
                                     // We still need to process this command, don't erase eeprom_command
                                     break;
                                 case 0xC:
@@ -1123,7 +1142,7 @@ static void write_mbc7_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                                     if (gb->mbc7.eeprom_write_enabled) {
                                         memset(gb->mbc_ram, 0, gb->mbc_ram_size);
                                     }
-                                    gb->mbc7.bits_countdown = 16;
+                                    gb->mbc7.argument_bits_left = 16;
                                     // We still need to process this command, don't erase eeprom_command
                                     break;
                             }
@@ -1131,10 +1150,10 @@ static void write_mbc7_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                     }
                     else {
                         // We're shifting in extra bits for a WRITE/WRAL command
-                        gb->mbc7.bits_countdown--;
+                        gb->mbc7.argument_bits_left--;
                         gb->mbc7.eeprom_do = true;
                         if (gb->mbc7.eeprom_di) {
-                            uint16_t bit = LE16(1 << gb->mbc7.bits_countdown);
+                            uint16_t bit = LE16(1 << gb->mbc7.argument_bits_left);
                             if (gb->mbc7.eeprom_command & 0x100) {
                                 // WRITE
                                 ((uint16_t *)gb->mbc_ram)[gb->mbc7.eeprom_command & 0x7F] |= bit;
@@ -1146,7 +1165,7 @@ static void write_mbc7_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                                 }
                             }
                         }
-                        if (gb->mbc7.bits_countdown == 0) { // We're done
+                        if (gb->mbc7.argument_bits_left == 0) { // We're done
                             gb->mbc7.eeprom_command = 0;
                             gb->mbc7.read_bits = (gb->mbc7.eeprom_command & 0x100)? 0xFF : 0x3FFF; // Emulate some time to settle
                         }
@@ -1212,7 +1231,12 @@ static void write_mbc_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
     if (!gb->mbc_ram || !gb->mbc_ram_size) {
         return;
     }
-    
+
+    if (gb->cartridge_type->mbc_type == GB_CAMERA && (gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] & 1)) {
+        /* Forbid writing to RAM while the camera is busy. */
+        return;
+    }
+
     uint8_t effective_bank = gb->mbc_ram_bank;
     if (gb->cartridge_type->mbc_type == GB_MBC3 && !gb->is_mbc30) {
         if (gb->cartridge_type->has_rtc) {
@@ -1256,6 +1280,7 @@ static void write_oam(GB_gameboy_t *gb, uint8_t addr, uint8_t value)
             break;
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB_A:
+        case GB_MODEL_GBP_A:
         case GB_MODEL_DMG_B:
         case GB_MODEL_MGB:
         case GB_MODEL_SGB_NTSC:
@@ -1414,35 +1439,33 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
 
             case GB_IO_LCDC:
                 if ((value & 0x80) && !(gb->io_registers[GB_IO_LCDC] & 0x80)) {
-                    if (value & 0x80) {
-                        // LCD turned on
-                        if (!gb->lcd_disabled_outside_of_vblank &&
-                            (gb->cycles_since_vblank_callback > 10 * 456 || GB_is_sgb(gb))) {
-                            // Trigger a vblank here so we don't exceed LCDC_PERIOD
-                            GB_display_vblank(gb);
-                        }
+                    // LCD turned on
+                    if (gb->lcd_status_callback) {
+                        gb->lcd_status_callback(gb, true);
                     }
-                    else {
-                        // LCD turned off
-                        if (gb->current_line < 144) {
-                             // ROM might be repeatedly disabling LCDC outside of vblank, avoid callback spam
-                            gb->lcd_disabled_outside_of_vblank = true;
-                        }
+                    if (!gb->lcd_disabled_outside_of_vblank &&
+                        (gb->cycles_since_vblank_callback > 10 * 456 || GB_is_sgb(gb))) {
+                        // Trigger a vblank here so we don't exceed LCDC_PERIOD
+                        GB_display_vblank(gb, GB_VBLANK_TYPE_ARTIFICIAL);
                     }
+
                     gb->display_cycles = 0;
                     gb->display_state = 0;
                     gb->double_speed_alignment = 0;
                     gb->cycles_for_line = 0;
                     if (GB_is_sgb(gb)) {
-                        gb->frame_skip_state = GB_FRAMESKIP_SECOND_FRAME_RENDERED;
+                        gb->frame_skip_state = GB_FRAMESKIP_FIRST_FRAME_RENDERED;
                     }
-                    else if (gb->frame_skip_state == GB_FRAMESKIP_SECOND_FRAME_RENDERED) {
+                    else {
                         gb->frame_skip_state = GB_FRAMESKIP_LCD_TURNED_ON;
                     }
                     GB_timing_sync(gb);
                 }
                 else if (!(value & 0x80) && (gb->io_registers[GB_IO_LCDC] & 0x80)) {
                     /* Sync after turning off LCD */
+                    if (gb->lcd_status_callback) {
+                        gb->lcd_status_callback(gb, false);
+                    }
                     gb->double_speed_alignment = 0;
                     GB_timing_sync(gb);
                     GB_lcd_off(gb);
@@ -1486,6 +1509,15 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                     GB_update_joyp(gb);
                 }
                 else if ((gb->io_registers[GB_IO_JOYP] & 0x30) != (value & 0x30)) {
+                    if (gb->model < GB_MODEL_SGB) { // DMG only
+                        if (gb->joyp_switching_delay) {
+                            gb->io_registers[GB_IO_JOYP] = (gb->joyp_switch_value & 0xF0) | (gb->io_registers[GB_IO_JOYP] & 0x0F);
+                        }
+                        gb->joyp_switch_value = value;
+                        gb->joyp_switching_delay = 24;
+                        value &= gb->io_registers[GB_IO_JOYP];
+                        gb->joypad_is_stable = false;
+                    }
                     GB_sgb_write(gb, value);
                     gb->io_registers[GB_IO_JOYP] = (value & 0xF0) | (gb->io_registers[GB_IO_JOYP] & 0x0F);
                     GB_update_joyp(gb);
@@ -1795,11 +1827,11 @@ void GB_hdma_run(GB_gameboy_t *gb)
         }
         gb->hdma_current_src++;
         GB_advance_cycles(gb, cycles);
-        if (gb->addr_for_hdma_conflict == 0xFFFF /* || (gb->model >= GB_MODEL_AGB_B && gb->cgb_double_speed) */) {
+        if (gb->addr_for_hdma_conflict == 0xFFFF /* || ((gb->model & ~GB_MODEL_GBP_BIT) >= GB_MODEL_AGB_B && gb->cgb_double_speed) */) {
             uint16_t addr = (gb->hdma_current_dest++ & 0x1FFF);
             gb->vram[vram_base + addr] = byte;
             // TODO: vram_write_blocked might not be the correct timing
-            if (gb->vram_write_blocked /* && gb->model < GB_MODEL_AGB_B */) {
+            if (gb->vram_write_blocked /* && (gb->model & ~GB_MODEL_GBP_BIT) < GB_MODEL_AGB_B */) {
                 gb->vram[(vram_base ^ 0x2000) + addr] = byte;
             }
         }
@@ -1813,7 +1845,7 @@ void GB_hdma_run(GB_gameboy_t *gb)
                 uint16_t addr = (gb->hdma_current_dest & gb->addr_for_hdma_conflict & 0x1FFF);
                 gb->vram[vram_base + addr] = byte;
                 // TODO: vram_write_blocked might not be the correct timing
-                if (gb->vram_write_blocked /* && gb->model < GB_MODEL_AGB_B */) {
+                if (gb->vram_write_blocked /* && (gb->model & ~GB_MODEL_GBP_BIT) < GB_MODEL_AGB_B */) {
                     gb->vram[(vram_base ^ 0x2000) + addr] = byte;
                 }
             }

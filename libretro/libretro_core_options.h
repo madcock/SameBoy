@@ -151,8 +151,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       NULL,
       "video",
       {
-         { "emulate hardware",    "Emulate Hardware"             },
-         { "preserve brightness", "Preserve Brightness"          },
+         { "emulate hardware",    "Modern – Balanced"            },
+         { "accurate",            "Modern – Accurate"            },
+         { "preserve brightness", "Modern – Boost Contrast"      },
          { "reduce contrast",     "Reduce Contrast"              },
          { "correct curves",      "Correct Color Curves"         },
          { "harsh reality",       "Harsh Reality (Low Contrast)" },
@@ -429,8 +430,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       NULL,
       "video",
       {
-         { "emulate hardware",    "Emulate Hardware"             },
-         { "preserve brightness", "Preserve Brightness"          },
+         { "emulate hardware",    "Modern – Balanced"            },
+         { "accurate",            "Modern – Accurate"            },
+         { "preserve brightness", "Modern – Boost Contrast"      },
          { "reduce contrast",     "Reduce Contrast"              },
          { "correct curves",      "Correct Color Curves"         },
          { "harsh reality",       "Harsh Reality (Low Contrast)" },
@@ -447,8 +449,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       NULL,
       "video",
       {
-         { "emulate hardware",    "Emulate Hardware"             },
-         { "preserve brightness", "Preserve Brightness"          },
+         { "emulate hardware",    "Modern – Balanced"            },
+         { "accurate",            "Modern – Accurate"            },
+         { "preserve brightness", "Modern – Boost Contrast"      },
          { "reduce contrast",     "Reduce Contrast"              },
          { "correct curves",      "Correct Color Curves"         },
          { "harsh reality",       "Harsh Reality (Low Contrast)" },
@@ -715,16 +718,13 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
    unsigned language = 0;
 #endif
 
-   if (!environ_cb || !categories_supported)
-      return;
+   if (!environ_cb || !categories_supported) return;
 
    *categories_supported = false;
 
-   if (!environ_cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version))
-      version = 0;
+   if (!environ_cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version)) version = 0;
 
-   if (version >= 2)
-   {
+   if (version >= 2) {
 #ifndef HAVE_NO_LANGEXTRA
       struct retro_core_options_v2_intl core_options_intl;
 
@@ -742,8 +742,7 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
             &options_us);
 #endif
    }
-   else
-   {
+   else {
       size_t i, j;
       size_t option_index              = 0;
       size_t num_options               = 0;
@@ -762,23 +761,17 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
       char **values_buf                = NULL;
 
       /* Determine total number of options */
-      while (true)
-      {
-         if (option_defs_us[num_options].key)
-            num_options++;
-         else
-            break;
+      while (true) {
+         if (option_defs_us[num_options].key) num_options++;
+         else break;
       }
 
-      if (version >= 1)
-      {
+      if (version >= 1) {
          /* Allocate US array */
-         option_v1_defs_us = (struct retro_core_option_definition *)
-               calloc(num_options + 1, sizeof(struct retro_core_option_definition));
+         option_v1_defs_us = (struct retro_core_option_definition *) calloc(num_options + 1, sizeof(struct retro_core_option_definition));
 
          /* Copy parameters from option_defs_us array */
-         for (i = 0; i < num_options; i++)
-         {
+         for (i = 0; i < num_options; i++) {
             struct retro_core_option_v2_definition *option_def_us = &option_defs_us[i];
             struct retro_core_option_value *option_values         = option_def_us->values;
             struct retro_core_option_definition *option_v1_def_us = &option_v1_defs_us[i];
@@ -790,8 +783,7 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
             option_v1_def_us->default_value = option_def_us->default_value;
 
             /* Values must be copied individually... */
-            while (option_values->value)
-            {
+            while (option_values->value) {
                option_v1_values->value = option_values->value;
                option_v1_values->label = option_values->label;
 
@@ -806,15 +798,11 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
              options_intl[language])
             option_defs_intl = options_intl[language]->definitions;
 
-         if (option_defs_intl)
-         {
+         if (option_defs_intl) {
             /* Determine number of intl options */
-            while (true)
-            {
-               if (option_defs_intl[num_options_intl].key)
-                  num_options_intl++;
-               else
-                  break;
+            while (true) {
+               if (option_defs_intl[num_options_intl].key) num_options_intl++;
+               else break;
             }
 
             /* Allocate intl array */
@@ -822,8 +810,7 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
                   calloc(num_options_intl + 1, sizeof(struct retro_core_option_definition));
 
             /* Copy parameters from option_defs_intl array */
-            for (i = 0; i < num_options_intl; i++)
-            {
+            for (i = 0; i < num_options_intl; i++) {
                struct retro_core_option_v2_definition *option_def_intl = &option_defs_intl[i];
                struct retro_core_option_value *option_values           = option_def_intl->values;
                struct retro_core_option_definition *option_v1_def_intl = &option_v1_defs_intl[i];
@@ -835,8 +822,7 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
                option_v1_def_intl->default_value = option_def_intl->default_value;
 
                /* Values must be copied individually... */
-               while (option_values->value)
-               {
+               while (option_values->value) {
                   option_v1_values->value = option_values->value;
                   option_v1_values->label = option_values->label;
 
@@ -854,19 +840,16 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
          environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS, option_v1_defs_us);
 #endif
       }
-      else
-      {
+      else {
          /* Allocate arrays */
          variables  = (struct retro_variable *)calloc(num_options + 1,
                sizeof(struct retro_variable));
          values_buf = (char **)calloc(num_options, sizeof(char *));
 
-         if (!variables || !values_buf)
-            goto error;
+         if (!variables || !values_buf) goto error;
 
          /* Copy parameters from option_defs_us array */
-         for (i = 0; i < num_options; i++)
-         {
+         for (i = 0; i < num_options; i++) {
             const char *key                        = option_defs_us[i].key;
             const char *desc                       = option_defs_us[i].desc;
             const char *default_value              = option_defs_us[i].default_value;
@@ -876,36 +859,30 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
 
             values_buf[i] = NULL;
 
-            if (desc)
-            {
+            if (desc) {
                size_t num_values = 0;
 
                /* Determine number of values */
-               while (true)
-               {
-                  if (values[num_values].value)
-                  {
+               while (true) {
+                  if (values[num_values].value) {
                      /* Check if this is the default value */
-                     if (default_value)
-                        if (strcmp(values[num_values].value, default_value) == 0)
-                           default_index = num_values;
+                     if (default_value) {
+                        if (strcmp(values[num_values].value, default_value) == 0) default_index = num_values;
 
                      buf_len += strlen(values[num_values].value);
                      num_values++;
+                     }
                   }
-                  else
-                     break;
+                  else break;
                }
 
                /* Build values string */
-               if (num_values > 0)
-               {
+               if (num_values > 0) {
                   buf_len += num_values - 1;
                   buf_len += strlen(desc);
 
                   values_buf[i] = (char *)calloc(buf_len, sizeof(char));
-                  if (!values_buf[i])
-                     goto error;
+                  if (!values_buf[i]) goto error;
 
                   strcpy(values_buf[i], desc);
                   strcat(values_buf[i], "; ");
@@ -914,10 +891,8 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
                   strcat(values_buf[i], values[default_index].value);
 
                   /* Add remaining values */
-                  for (j = 0; j < num_values; j++)
-                  {
-                     if (j != default_index)
-                     {
+                  for (j = 0; j < num_values; j++) {
+                     if (j != default_index) {
                         strcat(values_buf[i], "|");
                         strcat(values_buf[i], values[j].value);
                      }
@@ -937,26 +912,21 @@ static INLINE void libretro_set_core_options(retro_environment_t environ_cb,
 error:
       /* Clean up */
 
-      if (option_v1_defs_us)
-      {
+      if (option_v1_defs_us) {
          free(option_v1_defs_us);
          option_v1_defs_us = NULL;
       }
 
 #ifndef HAVE_NO_LANGEXTRA
-      if (option_v1_defs_intl)
-      {
+      if (option_v1_defs_intl) {
          free(option_v1_defs_intl);
          option_v1_defs_intl = NULL;
       }
 #endif
 
-      if (values_buf)
-      {
-         for (i = 0; i < num_options; i++)
-         {
-            if (values_buf[i])
-            {
+      if (values_buf) {
+         for (i = 0; i < num_options; i++) {
+            if (values_buf[i]) {
                free(values_buf[i]);
                values_buf[i] = NULL;
             }
@@ -966,8 +936,7 @@ error:
          values_buf = NULL;
       }
 
-      if (variables)
-      {
+      if (variables) {
          free(variables);
          variables = NULL;
       }

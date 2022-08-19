@@ -106,8 +106,8 @@ typedef struct __attribute__((packed)) {
     uint8_t flags;
 } object_t;
 
-void GB_display_vblank(GB_gameboy_t *gb)
-{  
+void GB_display_vblank(GB_gameboy_t *gb, GB_vblank_type_t type)
+{
     gb->vblank_just_occured = true;
     gb->cycles_since_vblank_callback = 0;
     gb->lcd_disabled_outside_of_vblank = false;
@@ -123,9 +123,19 @@ void GB_display_vblank(GB_gameboy_t *gb)
         }
     }
     
+    if (GB_is_cgb(gb) && type == GB_VBLANK_TYPE_NORMAL_FRAME && gb->frame_repeat_countdown > 0 && gb->frame_skip_state == GB_FRAMESKIP_LCD_TURNED_ON) {
+        GB_handle_rumble(gb);
+        
+        if (gb->vblank_callback) {
+            gb->vblank_callback(gb, GB_VBLANK_TYPE_REPEAT);
+        }
+        GB_timing_sync(gb);
+        return;
+    }
+    
     bool is_ppu_stopped = !GB_is_cgb(gb) && gb->stopped && gb->io_registers[GB_IO_LCDC] & 0x80;
     
-    if (!gb->disable_rendering && ((!(gb->io_registers[GB_IO_LCDC] & 0x80) || is_ppu_stopped) || gb->cgb_repeated_a_frame || gb->frame_skip_state == GB_FRAMESKIP_LCD_TURNED_ON)) {
+    if (!gb->disable_rendering && ((!(gb->io_registers[GB_IO_LCDC] & 0x80) || is_ppu_stopped) || gb->frame_skip_state == GB_FRAMESKIP_LCD_TURNED_ON)) {
         /* LCD is off, set screen to white or black (if LCD is on in stop mode) */
         if (!GB_is_sgb(gb)) {
             uint32_t color = 0;
@@ -211,7 +221,7 @@ void GB_display_vblank(GB_gameboy_t *gb)
     GB_handle_rumble(gb);
 
     if (gb->vblank_callback) {
-        gb->vblank_callback(gb);
+        gb->vblank_callback(gb, type);
     }
     GB_timing_sync(gb);
 }
@@ -243,17 +253,17 @@ static inline uint8_t scale_channel(uint8_t x)
 
 static inline uint8_t scale_channel_with_curve(uint8_t x)
 {
-    return (uint8_t[]){0,6,12,20,28,36,45,56,66,76,88,100,113,125,137,149,161,172,182,192,202,210,218,225,232,238,243,247,250,252,254,255}[x];
+    return (const uint8_t[]){0,6,12,20,28,36,45,56,66,76,88,100,113,125,137,149,161,172,182,192,202,210,218,225,232,238,243,247,250,252,254,255}[x];
 }
 
 static inline uint8_t scale_channel_with_curve_agb(uint8_t x)
 {
-    return (uint8_t[]){0,3,8,14,20,26,33,40,47,54,62,70,78,86,94,103,112,120,129,138,147,157,166,176,185,195,205,215,225,235,245,255}[x];
+    return (const uint8_t[]){0,3,8,14,20,26,33,40,47,54,62,70,78,86,94,103,112,120,129,138,147,157,166,176,185,195,205,215,225,235,245,255}[x];
 }
 
 static inline uint8_t scale_channel_with_curve_sgb(uint8_t x)
 {
-    return (uint8_t[]){0,2,5,9,15,20,27,34,42,50,58,67,76,85,94,104,114,123,133,143,153,163,173,182,192,202,211,220,229,238,247,255}[x];
+    return (const uint8_t[]){0,2,5,9,15,20,27,34,42,50,58,67,76,85,94,104,114,123,133,143,153,163,173,182,192,202,211,220,229,238,247,255}[x];
 }
 
 
@@ -281,41 +291,69 @@ uint32_t GB_convert_rgb15(GB_gameboy_t *gb, uint16_t color, bool for_border)
         
         if (gb->color_correction_mode != GB_COLOR_CORRECTION_CORRECT_CURVES) {
             uint8_t new_r, new_g, new_b;
-            if (agb) {
-                new_g = (g * 6 + b * 1) / 7;
+            if (g != b) { // Minor optimization
+                double gamma = 2.2;
+                if (gb->color_correction_mode < GB_COLOR_CORRECTION_REDUCE_CONTRAST) {
+                    /* Don't use absolutely gamma-correct mixing for the high-contrast
+                       modes, to prevent the blue hues from being too washed out */
+                    gamma = 1.6;
+                }
+                
+                // TODO: Optimze pow out using a LUT
+                if (agb) {
+                    new_g = round(pow((pow(g / 255.0, gamma) * 5 + pow(b / 255.0, gamma)) / 6, 1 / gamma) * 255);
+                }
+                else {
+                    new_g = round(pow((pow(g / 255.0, gamma) * 3 + pow(b / 255.0, gamma)) / 4, 1 / gamma) * 255);
+                }
             }
             else {
-                new_g = (g * 3 + b) / 4;
+                new_g = g;
             }
+   
             new_r = r;
             new_b = b;
             if (gb->color_correction_mode == GB_COLOR_CORRECTION_REDUCE_CONTRAST) {
                 r = new_r;
-                g = new_r;
-                b = new_r;
+                g = new_g;
+                b = new_b;
                 
-                new_r = new_r * 7 / 8 + (    g + b) / 16;
-                new_g = new_g * 7 / 8 + (r   +   b) / 16;
-                new_b = new_b * 7 / 8 + (r + g    ) / 16;
+                new_r = new_r * 15 / 16 + (    g + b) / 32;
+                new_g = new_g * 15 / 16 + (r   +   b) / 32;
+                new_b = new_b * 15 / 16 + (r + g    ) / 32;
                 
-                new_r = new_r * (224 - 32) / 255 + 32;
-                new_g = new_g * (220 - 36) / 255 + 36;
-                new_b = new_b * (216 - 40) / 255 + 40;
+                if (agb) {
+                    new_r = new_r * (224 - 20) / 255 + 20;
+                    new_g = new_g * (220 - 18) / 255 + 18;
+                    new_b = new_b * (216 - 16) / 255 + 16;
+                }
+                else {
+                    new_r = new_r * (220 - 40) / 255 + 40;
+                    new_g = new_g * (224 - 36) / 255 + 36;
+                    new_b = new_b * (216 - 32) / 255 + 32;
+                }
             }
             else if (gb->color_correction_mode == GB_COLOR_CORRECTION_LOW_CONTRAST) {
                 r = new_r;
-                g = new_r;
-                b = new_r;
+                g = new_g;
+                b = new_b;
+
+                new_r = new_r * 15 / 16 + (    g + b) / 32;
+                new_g = new_g * 15 / 16 + (r   +   b) / 32;
+                new_b = new_b * 15 / 16 + (r + g    ) / 32;
                 
-                new_r = new_r * 7 / 8 + (    g + b) / 16;
-                new_g = new_g * 7 / 8 + (r   +   b) / 16;
-                new_b = new_b * 7 / 8 + (r + g    ) / 16;
-                
-                new_r = new_r * (162 - 67) / 255 + 67;
-                new_g = new_g * (167 - 62) / 255 + 62;
-                new_b = new_b * (157 - 58) / 255 + 58;
+                if (agb) {
+                    new_r = new_r * (167 - 27) / 255 + 27;
+                    new_g = new_g * (165 - 24) / 255 + 24;
+                    new_b = new_b * (157 - 22) / 255 + 22;
+                }
+                else {
+                    new_r = new_r * (162 - 45) / 255 + 45;
+                    new_g = new_g * (167 - 41) / 255 + 41;
+                    new_b = new_b * (157 - 38) / 255 + 38;
+                }
             }
-            else if (gb->color_correction_mode == GB_COLOR_CORRECTION_PRESERVE_BRIGHTNESS) {
+            else if (gb->color_correction_mode == GB_COLOR_CORRECTION_MODERN_BOOST_CONTRAST) {
                 uint8_t old_max = MAX(r, MAX(g, b));
                 uint8_t new_max = MAX(new_r, MAX(new_g, new_b));
                 
@@ -473,7 +511,9 @@ static inline uint8_t oam_read(GB_gameboy_t *gb, uint8_t addr)
         if (gb->hdma_in_progress) {
             return GB_read_oam(gb, (gb->hdma_current_src & ~1) | (addr & 1));
         }
-        return gb->oam[((gb->dma_current_dest - 1 + (gb->halted || gb->stopped)) & ~1) | (addr & 1)];
+        if (gb->dma_current_dest != 0xA0) {
+            return gb->oam[(gb->dma_current_dest & ~1) | (addr & 1)];
+        }
     }
     return gb->oam[addr];
 }
@@ -906,6 +946,21 @@ static void advance_fetcher_state_machine(GB_gameboy_t *gb, unsigned *cycles)
             }
             if (fifo_size(&gb->bg_fifo) > 0) break;
             
+            if (unlikely(gb->wy_triggered && !(gb->io_registers[GB_IO_LCDC] & 0x20) && !GB_is_cgb(gb))) {
+                /* See https://github.com/LIJI32/SameBoy/issues/278 for documentation */
+                uint8_t logical_position = gb->position_in_line + 7;
+                if (logical_position > 167) {
+                    logical_position = 0;
+                }
+                if (gb->io_registers[GB_IO_WX] == logical_position) {
+                    gb->bg_fifo.read_end--;
+                    gb->bg_fifo.read_end &= GB_FIFO_LENGTH - 1;
+                    gb->bg_fifo.fifo[gb->bg_fifo.read_end] = (GB_fifo_item_t){0,};
+                    gb->bg_fifo.size = 1;
+                    break;
+                }
+            }
+            
             fifo_push_bg_row(&gb->bg_fifo, gb->current_tile_data[0], gb->current_tile_data[1],
                              gb->current_tile_attributes & 7, gb->current_tile_attributes & 0x80, gb->current_tile_attributes & 0x20);
             gb->fetcher_state = 0;
@@ -1292,8 +1347,17 @@ static inline uint16_t mode3_batching_length(GB_gameboy_t *gb)
     if (gb->hdma_on) return 0;
     if (gb->stopped) return 0;
     if (GB_is_dma_active(gb)) return 0;
-    if (gb->wy_triggered && (gb->io_registers[GB_IO_LCDC] & 0x20) && (gb->io_registers[GB_IO_WX] < 8 || gb->io_registers[GB_IO_WX] == 166)) {
-        return 0;
+    if (gb->wy_triggered) {
+        if (gb->io_registers[GB_IO_LCDC] & 0x20) {
+            if ((gb->io_registers[GB_IO_WX] < 8 || gb->io_registers[GB_IO_WX] == 166)) {
+                return 0;
+            }
+        }
+        else {
+            if (gb->io_registers[GB_IO_WX] < 167 && !GB_is_cgb(gb)) {
+                return 0;
+            }
+        }
     }
 
     // No objects or window, timing is trivial
@@ -1344,11 +1408,18 @@ void GB_display_run(GB_gameboy_t *gb, unsigned cycles, bool force)
         gb->mode_for_interrupt = 3;
     }
     gb->cycles_since_vblank_callback += cycles / 2;
+    
+    if (cycles < gb->frame_repeat_countdown) {
+        gb->frame_repeat_countdown -= cycles;
+    }
+    else {
+        gb->frame_repeat_countdown = 0;
+    }
 
     /* The PPU does not advance while in STOP mode on the DMG */
     if (gb->stopped && !GB_is_cgb(gb)) {
         if (gb->cycles_since_vblank_callback >= LCDC_PERIOD) {
-            GB_display_vblank(gb);
+            GB_display_vblank(gb, GB_VBLANK_TYPE_ARTIFICIAL);
         }
         return;
     }
@@ -1402,8 +1473,7 @@ void GB_display_run(GB_gameboy_t *gb, unsigned cycles, bool force)
             if (gb->cycles_since_vblank_callback < LCDC_PERIOD) {
                 GB_SLEEP(gb, display, 1, LCDC_PERIOD - gb->cycles_since_vblank_callback);
             }
-            GB_display_vblank(gb);
-            gb->cgb_repeated_a_frame = true;
+            GB_display_vblank(gb, GB_VBLANK_TYPE_LCD_OFF);
         }
         return;
     }
@@ -1636,13 +1706,13 @@ void GB_display_run(GB_gameboy_t *gb, unsigned cycles, bool force)
                 if (!gb->wx_triggered && gb->wy_triggered && (gb->io_registers[GB_IO_LCDC] & 0x20)) {
                     bool should_activate_window = false;
                     if (gb->io_registers[GB_IO_WX] == 0) {
-                        static const uint8_t scx_to_wx0_comparisons[] = {-7, -9, -10, -11, -12, -13, -14, -14};
+                        static const uint8_t scx_to_wx0_comparisons[] = {-7, -1, -2, -3, -4, -5, -6, -6};
                         if (gb->position_in_line == scx_to_wx0_comparisons[gb->io_registers[GB_IO_SCX] & 7]) {
                             should_activate_window = true;
                         }
                     }
                     else if (gb->wx166_glitch) {
-                        static const uint8_t scx_to_wx166_comparisons[] = {-8, -9, -10, -11, -12, -13, -14, -15};
+                        static const uint8_t scx_to_wx166_comparisons[] = {-16, -1, -2, -3, -4, -5, -6, -7};
                         if (gb->position_in_line == scx_to_wx166_comparisons[gb->io_registers[GB_IO_SCX] & 7]) {
                             should_activate_window = true;
                         }
@@ -1681,13 +1751,14 @@ void GB_display_run(GB_gameboy_t *gb, unsigned cycles, bool force)
                     }
                 }
                 
-                /* TODO: What happens when WX=0? */
+                /* TODO: What happens when WX=0? When the fifo is full? */
                 if (!GB_is_cgb(gb) && gb->wx_triggered && !gb->window_is_being_fetched &&
-                    gb->fetcher_state == 0 && gb->io_registers[GB_IO_WX] == (uint8_t) (gb->position_in_line + 7) ) {
+                    gb->fetcher_state == 0 && gb->io_registers[GB_IO_WX] == (uint8_t) (gb->position_in_line + 7) && gb->bg_fifo.size == 8) {
                     // Insert a pixel right at the FIFO's end
                     gb->bg_fifo.read_end--;
                     gb->bg_fifo.read_end &= GB_FIFO_LENGTH - 1;
                     gb->bg_fifo.fifo[gb->bg_fifo.read_end] = (GB_fifo_item_t){0,};
+                    gb->bg_fifo.size++;
                     gb->window_is_being_fetched = false;
                 }
 
@@ -1889,7 +1960,7 @@ skip_slow_mode_3:
             // Todo: unverified timing
             gb->current_lcd_line++;
             if (gb->current_lcd_line == LINES && GB_is_sgb(gb)) {
-                GB_display_vblank(gb);
+                GB_display_vblank(gb, GB_VBLANK_TYPE_NORMAL_FRAME);
             }
             
             if (gb->icd_hreset_callback) {
@@ -1931,30 +2002,33 @@ skip_slow_mode_3:
                 
                 if (gb->frame_skip_state == GB_FRAMESKIP_LCD_TURNED_ON) {
                     if (GB_is_cgb(gb)) {
-                        GB_display_vblank(gb);
-                        gb->frame_skip_state = GB_FRAMESKIP_FIRST_FRAME_SKIPPED;
+                        GB_display_vblank(gb, GB_VBLANK_TYPE_NORMAL_FRAME);
+                        gb->frame_skip_state = GB_FRAMESKIP_FIRST_FRAME_RENDERED;
                     }
                     else {
                         if (!GB_is_sgb(gb) || gb->current_lcd_line < LINES) {
                             gb->is_odd_frame ^= true;
-                            GB_display_vblank(gb);
+                            GB_display_vblank(gb, GB_VBLANK_TYPE_NORMAL_FRAME);
                         }
-                        gb->frame_skip_state = GB_FRAMESKIP_SECOND_FRAME_RENDERED;
+                        gb->frame_skip_state = GB_FRAMESKIP_FIRST_FRAME_RENDERED;
                     }
                 }
                 else {
                     if (!GB_is_sgb(gb) || gb->current_lcd_line < LINES) {
                         gb->is_odd_frame ^= true;
-                        GB_display_vblank(gb);
-                    }
-                    if (gb->frame_skip_state == GB_FRAMESKIP_FIRST_FRAME_SKIPPED) {
-                        gb->cgb_repeated_a_frame = true;
-                        gb->frame_skip_state = GB_FRAMESKIP_SECOND_FRAME_RENDERED;
-                    }
-                    else {
-                        gb->cgb_repeated_a_frame = false;
+                        GB_display_vblank(gb, GB_VBLANK_TYPE_NORMAL_FRAME);
                     }
                 }
+            }
+            
+            /* 3640 is just a few cycles less than 4 lines, no clue where the
+               AGB constant comes from (These are measured and confirmed)  */
+            gb->frame_repeat_countdown = LINES * LINE_LENGTH * 2 + (gb->model > GB_MODEL_CGB_E? 5982 : 3640); // 8MHz units
+            if (gb->display_cycles < gb->frame_repeat_countdown) {
+                gb->frame_repeat_countdown -= gb->display_cycles;
+            }
+            else {
+                gb->frame_repeat_countdown = 0;
             }
             
             GB_SLEEP(gb, display, 13, LINE_LENGTH - 5);

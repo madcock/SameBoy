@@ -1183,6 +1183,11 @@ void GB_set_pixels_output(GB_gameboy_t *gb, uint32_t *output)
     gb->screen = output;
 }
 
+uint32_t *GB_get_pixels_output(GB_gameboy_t *gb)
+{
+    return gb->screen;
+}
+
 void GB_set_vblank_callback(GB_gameboy_t *gb, GB_vblank_callback_t callback)
 {
     gb->vblank_callback = callback;
@@ -1218,6 +1223,11 @@ void GB_set_execution_callback(GB_gameboy_t *gb, GB_execution_callback_t callbac
 void GB_set_lcd_line_callback(GB_gameboy_t *gb, GB_lcd_line_callback_t callback)
 {
     gb->lcd_line_callback = callback;
+}
+
+void GB_set_lcd_status_callback(GB_gameboy_t *gb, GB_lcd_status_callback_t callback)
+{
+    gb->lcd_status_callback = callback;
 }
 
 const GB_palette_t GB_PALETTE_GREY = {{{0x00, 0x00, 0x00}, {0x55, 0x55, 0x55}, {0xAA, 0xAA, 0xAA}, {0xFF, 0xFF, 0xFF}, {0xFF, 0xFF, 0xFF}}};
@@ -1392,6 +1402,7 @@ static void reset_ram(GB_gameboy_t *gb)
         case GB_MODEL_MGB:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB_A: /* Unverified */
+        case GB_MODEL_GBP_A:
             for (unsigned i = 0; i < gb->ram_size; i++) {
                 gb->ram[i] = GB_random();
             }
@@ -1456,6 +1467,7 @@ static void reset_ram(GB_gameboy_t *gb)
         case GB_MODEL_CGB_D:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB_A:
+        case GB_MODEL_GBP_A:
             for (unsigned i = 0; i < sizeof(gb->hram); i++) {
                 gb->hram[i] = GB_random();
             }
@@ -1489,6 +1501,7 @@ static void reset_ram(GB_gameboy_t *gb)
         case GB_MODEL_CGB_D: 
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB_A:
+        case GB_MODEL_GBP_A:
             /* Zero'd out by boot ROM anyway */
             break;
             
@@ -1523,6 +1536,7 @@ static void reset_ram(GB_gameboy_t *gb)
         case GB_MODEL_CGB_D:
         case GB_MODEL_CGB_E:
         case GB_MODEL_AGB_A:
+        case GB_MODEL_GBP_A:
             /* Initialized by CGB-A and newer, 0s in CGB-0 */
             break;
         case GB_MODEL_MGB: {
@@ -1603,6 +1617,7 @@ static void request_boot_rom(GB_gameboy_t *gb)
                 type = GB_BOOT_ROM_CGB;
                 break;
             case GB_MODEL_AGB_A:
+            case GB_MODEL_GBP_A:
                 type = GB_BOOT_ROM_AGB;
                 break;
         }
@@ -1723,7 +1738,11 @@ void *GB_get_direct_access(GB_gameboy_t *gb, GB_direct_access_t access, size_t *
     switch (access) {
         case GB_DIRECT_ACCESS_ROM:
             *size = gb->rom_size;
-            *bank = gb->mbc_rom_bank;
+            *bank = gb->mbc_rom_bank & (gb->rom_size / 0x4000 - 1);
+            return gb->rom;
+        case GB_DIRECT_ACCESS_ROM0:
+            *size = gb->rom_size;
+            *bank = gb->mbc_rom0_bank & (gb->rom_size / 0x4000 - 1);
             return gb->rom;
         case GB_DIRECT_ACCESS_RAM:
             *size = gb->ram_size;
@@ -1731,7 +1750,7 @@ void *GB_get_direct_access(GB_gameboy_t *gb, GB_direct_access_t access, size_t *
             return gb->ram;
         case GB_DIRECT_ACCESS_CART_RAM:
             *size = gb->mbc_ram_size;
-            *bank = gb->mbc_ram_bank;
+            *bank = gb->mbc_ram_bank & (gb->mbc_ram_size / 0x2000 - 1);
             return gb->mbc_ram;
         case GB_DIRECT_ACCESS_VRAM:
             *size = gb->vram_size;
