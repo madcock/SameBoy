@@ -225,6 +225,8 @@ static void render(GB_gameboy_t *gb)
         gb->apu_output.last_update[i] = 0;
     }
     gb->apu_output.cycles_since_render = 0;
+    
+    if (gb->sgb && gb->sgb->intro_animation < GB_SGB_INTRO_ANIMATION_LENGTH) return;
 
     GB_sample_t filtered_output = gb->apu_output.highpass_mode?
         (GB_sample_t) {output.left - gb->apu_output.highpass_diff.left,
@@ -986,6 +988,7 @@ static inline uint16_t effective_channel4_counter(GB_gameboy_t *gb)
             }
             break;
         case GB_MODEL_AGB_A:
+        case GB_MODEL_GBP_A:
             /* TODO: AGBs are not affected, but AGSes are. They don't seem to follow a simple
                pattern like the other revisions. */
             /* For the most part, AGS seems to do:
@@ -1108,19 +1111,6 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
         case GB_IO_NR13:
         case GB_IO_NR23: {
             unsigned index = reg == GB_IO_NR23? GB_SQUARE_2: GB_SQUARE_1;
-            if (gb->apu.is_active[index]) {
-                /* On an AGB, as well as on CGB C and earlier (TODO: Tested: 0, B and C), it behaves slightly different on
-                 double speed. */
-                if (gb->model == GB_MODEL_CGB_E || gb->model == GB_MODEL_CGB_D || gb->apu.square_channels[index].sample_countdown & 1) {
-                    if (gb->apu.square_channels[index].did_tick &&
-                        gb->apu.square_channels[index].sample_countdown >> 1 == (gb->apu.square_channels[index].sample_length ^ 0x7FF)) {
-                        gb->apu.square_channels[index].current_sample_index--;
-                        gb->apu.square_channels[index].current_sample_index &= 7;
-                        gb->apu.square_channels[index].sample_surpressed = false;
-                    }
-                }
-            }
-            
             gb->apu.square_channels[index].sample_length &= ~0xFF;
             gb->apu.square_channels[index].sample_length |= value & 0xFF;
             break;
@@ -1130,10 +1120,10 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
         case GB_IO_NR24: {
             unsigned index = reg == GB_IO_NR24? GB_SQUARE_2: GB_SQUARE_1;
             bool was_active = gb->apu.is_active[index];
-            /* TODO: When the sample length changes right before being updated, the countdown should change to the
-                     old length, but the current sample should not change. Because our write timing isn't accurate to
-                     the T-cycle, we hack around it by stepping the sample index backwards. */
-            if ((value & 0x80) == 0 && gb->apu.is_active[index]) {
+            /* TODO: When the sample length changes right before being updated from ≥$700 to <$700, the countdown
+                     should change to the old length, but the current sample should not change. Because our write
+                     timing isn't accurate to the T-cycle, we hack around it by stepping the sample index backwards. */
+            if ((value & 0x80) == 0 && gb->apu.is_active[index] && (gb->io_registers[reg] & 0x7) == 7 && (value & 7) != 7) {
                 /* On an AGB, as well as on CGB C and earlier (TODO: Tested: 0, B and C), it behaves slightly different on
                    double speed. */
                 if (gb->model == GB_MODEL_CGB_E || gb->model == GB_MODEL_CGB_D || gb->apu.square_channels[index].sample_countdown & 1) {
@@ -1289,7 +1279,7 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
             gb->apu.wave_channel.pulse_length = (0x100 - value);
             break;
         case GB_IO_NR32:
-            gb->apu.wave_channel.shift = (uint8_t[]){4, 0, 1, 2}[(value >> 5) & 3];
+            gb->apu.wave_channel.shift = (const uint8_t[]){4, 0, 1, 2}[(value >> 5) & 3];
             if (gb->apu.is_active[GB_WAVE]) {
                 update_wave_sample(gb, 0);
             }
@@ -1404,11 +1394,11 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                 if (!divisor) divisor = 2;
                 if (gb->model > GB_MODEL_CGB_C) {
                     gb->apu.noise_channel.counter_countdown =
-                    divisor + (divisor == 2? 0 : (uint8_t[]){2, 1, 0, 3}[(gb->apu.noise_channel.alignment) & 3]);
+                    divisor + (divisor == 2? 0 : (const uint8_t[]){2, 1, 0, 3}[(gb->apu.noise_channel.alignment) & 3]);
                 }
                 else {
                     gb->apu.noise_channel.counter_countdown =
-                    divisor + (divisor == 2? 0 : (uint8_t[]){2, 1, 4, 3}[(gb->apu.noise_channel.alignment) & 3]);
+                    divisor + (divisor == 2? 0 : (const uint8_t[]){2, 1, 4, 3}[(gb->apu.noise_channel.alignment) & 3]);
                 }
                 gb->apu.noise_channel.delta = 0;
             }
@@ -1452,10 +1442,10 @@ void GB_apu_write(GB_gameboy_t *gb, uint8_t reg, uint8_t value)
                     }
                     else {
                         if (gb->model <= GB_MODEL_CGB_C) {
-                            gb->apu.noise_channel.counter_countdown += (uint8_t[]){2, 1, 4, 3}[gb->apu.noise_channel.alignment & 3];
+                            gb->apu.noise_channel.counter_countdown += (const uint8_t[]){2, 1, 4, 3}[gb->apu.noise_channel.alignment & 3];
                         }
                         else {
-                            gb->apu.noise_channel.counter_countdown += (uint8_t[]){2, 1, 0, 3}[gb->apu.noise_channel.alignment & 3];
+                            gb->apu.noise_channel.counter_countdown += (const uint8_t[]){2, 1, 0, 3}[gb->apu.noise_channel.alignment & 3];
                         }
                         if (((gb->apu.noise_channel.alignment + 1) & 3) < 2) {
                             if ((gb->io_registers[GB_IO_NR43] & 0x07) == 1) {

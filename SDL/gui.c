@@ -5,9 +5,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include "utils.h"
 #include "gui.h"
 #include "font.h"
+#include "audio/audio.h"
 
 static const SDL_Color gui_palette[4] = {{8, 24, 16,}, {57, 97, 57,}, {132, 165, 99}, {198, 222, 140}};
 static uint32_t gui_palette_native[4];
@@ -20,6 +22,10 @@ enum pending_command pending_command;
 unsigned command_parameter;
 char *dropped_state_file = NULL;
 
+static char **custom_palettes;
+static unsigned n_custom_palettes;
+
+
 #ifdef __APPLE__
 #define MODIFIER_NAME " " CMD_STRING
 #else
@@ -29,6 +35,8 @@ char *dropped_state_file = NULL;
 shader_t shader;
 static SDL_Rect rect;
 static unsigned factor;
+
+static SDL_Surface *converted_background = NULL;
 
 void render_texture(void *pixels,  void *previous)
 {
@@ -66,54 +74,6 @@ void render_texture(void *pixels,  void *previous)
         SDL_GL_SwapWindow(window);
     }
 }
-
-configuration_t configuration =
-{
-    .keys = {
-        SDL_SCANCODE_RIGHT,
-        SDL_SCANCODE_LEFT,
-        SDL_SCANCODE_UP,
-        SDL_SCANCODE_DOWN,
-        SDL_SCANCODE_X,
-        SDL_SCANCODE_Z,
-        SDL_SCANCODE_BACKSPACE,
-        SDL_SCANCODE_RETURN,
-        SDL_SCANCODE_SPACE
-    },
-    .keys_2 = {
-        SDL_SCANCODE_TAB,
-        SDL_SCANCODE_LSHIFT,
-    },
-    .joypad_configuration = {
-        13,
-        14,
-        11,
-        12,
-        0,
-        1,
-        9,
-        8,
-        10,
-        4,
-        -1,
-        5,
-    },
-    .joypad_axises = {
-        0,
-        1,
-    },
-    .color_correction_mode = GB_COLOR_CORRECTION_EMULATE_HARDWARE,
-    .highpass_mode = GB_HIGHPASS_ACCURATE,
-    .scaling_mode = GB_SDL_SCALING_INTEGER_FACTOR,
-    .blending_mode = GB_FRAME_BLENDING_MODE_ACCURATE,
-    .rewind_length = 60 * 2,
-    .model = MODEL_CGB,
-    .volume = 100,
-    .rumble_mode = GB_RUMBLE_ALL_GAMES,
-    .default_scale = 2,
-    .color_temperature = 10,
-};
-
 
 static const char *help[] = {
 "Drop a ROM to play.\n"
@@ -313,9 +273,10 @@ static void item_help(unsigned index)
 
 static void enter_emulation_menu(unsigned index);
 static void enter_graphics_menu(unsigned index);
-static void enter_controls_menu(unsigned index);
+static void enter_keyboard_menu(unsigned index);
 static void enter_joypad_menu(unsigned index);
 static void enter_audio_menu(unsigned index);
+static void enter_controls_menu(unsigned index);
 static void toggle_audio_recording(unsigned index);
 
 extern void set_filename(const char *new_filename, typeof(free) *new_free_function);
@@ -345,7 +306,7 @@ static void recalculate_menu_height(void)
     }
 }
 
-char audio_recording_menu_item[] = "Start Audio Recording";
+static char audio_recording_menu_item[] = "Start Audio Recording";
 
 static const struct menu_item paused_menu[] = {
     {"Resume", NULL},
@@ -353,8 +314,7 @@ static const struct menu_item paused_menu[] = {
     {"Emulation Options", enter_emulation_menu},
     {"Graphic Options", enter_graphics_menu},
     {"Audio Options", enter_audio_menu},
-    {"Keyboard Options", enter_controls_menu},
-    {"Joypad Options", enter_joypad_menu},
+    {"Control Options", enter_controls_menu},
     {audio_recording_menu_item, toggle_audio_recording},
     {"Help", item_help},
     {"Quit SameBoy", item_exit},
@@ -390,10 +350,46 @@ static void cycle_model_backwards(unsigned index)
     pending_command = GB_SDL_RESET_COMMAND;
 }
 
-const char *current_model_string(unsigned index)
+static const char *current_model_string(unsigned index)
 {
     return (const char *[]){"Game Boy", "Game Boy Color", "Game Boy Advance", "Super Game Boy", "Game Boy Pocket"}
         [configuration.model];
+}
+
+static void cycle_cgb_revision(unsigned index)
+{
+    
+    if (configuration.cgb_revision == GB_MODEL_CGB_E - GB_MODEL_CGB_0) {
+        configuration.cgb_revision = 0;
+    }
+    else {
+        configuration.cgb_revision++;
+    }
+    pending_command = GB_SDL_RESET_COMMAND;
+}
+
+static void cycle_cgb_revision_backwards(unsigned index)
+{
+    if (configuration.cgb_revision == 0) {
+        configuration.cgb_revision = GB_MODEL_CGB_E - GB_MODEL_CGB_0;
+    }
+    else {
+        configuration.cgb_revision--;
+    }
+    pending_command = GB_SDL_RESET_COMMAND;
+}
+
+static const char *current_cgb_revision_string(unsigned index)
+{
+    return (const char *[]){
+        "CPU CGB 0 (Exp.)",
+        "CPU CGB A (Exp.)",
+        "CPU CGB B (Exp.)",
+        "CPU CGB C (Exp.)",
+        "CPU CGB D",
+        "CPU CGB E",
+    }
+    [configuration.cgb_revision];
 }
 
 static void cycle_sgb_revision(unsigned index)
@@ -415,7 +411,7 @@ static void cycle_sgb_revision_backwards(unsigned index)
     pending_command = GB_SDL_RESET_COMMAND;
 }
 
-const char *current_sgb_revision_string(unsigned index)
+static const char *current_sgb_revision_string(unsigned index)
 {
     return (const char *[]){"Super Game Boy NTSC", "Super Game Boy PAL", "Super Game Boy 2"}
     [configuration.sgb_revision];
@@ -457,7 +453,7 @@ static void cycle_rewind_backwards(unsigned index)
     GB_set_rewind_length(&gb, configuration.rewind_length);
 }
 
-const char *current_rewind_string(unsigned index)
+static const char *current_rewind_string(unsigned index)
 {
     for (unsigned i = 0; i < sizeof(rewind_lengths) / sizeof(rewind_lengths[0]); i++) {
         if (configuration.rewind_length == rewind_lengths[i]) {
@@ -467,7 +463,7 @@ const char *current_rewind_string(unsigned index)
     return "Custom";
 }
 
-const char *current_bootrom_string(unsigned index)
+static const char *current_bootrom_string(unsigned index)
 {
     if (!configuration.bootrom_path[0]) {
         return "Built-in Boot ROMs";
@@ -512,7 +508,7 @@ static void toggle_rtc_mode(unsigned index)
     configuration.rtc_mode = !configuration.rtc_mode;
 }
 
-const char *current_rtc_mode_string(unsigned index)
+static const char *current_rtc_mode_string(unsigned index)
 {
     switch (configuration.rtc_mode) {
         case GB_RTC_MODE_SYNC_TO_HOST: return "Sync to System Clock";
@@ -521,9 +517,26 @@ const char *current_rtc_mode_string(unsigned index)
     return "";
 }
 
+static void cycle_agb_revision(unsigned index)
+{
+    
+    configuration.agb_revision ^= GB_MODEL_GBP_BIT;
+    pending_command = GB_SDL_RESET_COMMAND;
+}
+
+static const char *current_agb_revision_string(unsigned index)
+{
+    if (configuration.agb_revision == GB_MODEL_GBP_A) {
+        return "CPU AGB A (GBP)";
+    }
+    return "CPU AGB A (AGB)";
+}
+
 static const struct menu_item emulation_menu[] = {
     {"Emulated Model:", cycle_model, current_model_string, cycle_model_backwards},
     {"SGB Revision:", cycle_sgb_revision, current_sgb_revision_string, cycle_sgb_revision_backwards},
+    {"GBC Revision:", cycle_cgb_revision, current_cgb_revision_string, cycle_cgb_revision_backwards},
+    {"GBA Revision:", cycle_agb_revision, current_agb_revision_string, cycle_agb_revision},
     {"Boot ROMs Folder:", toggle_bootrom, current_bootrom_string, toggle_bootrom},
     {"Rewind Length:", cycle_rewind, current_rewind_string, cycle_rewind_backwards},
     {"Real Time Clock:", toggle_rtc_mode, current_rtc_mode_string, toggle_rtc_mode},
@@ -539,13 +552,13 @@ static void enter_emulation_menu(unsigned index)
     recalculate_menu_height();
 }
 
-const char *current_scaling_mode(unsigned index)
+static const char *current_scaling_mode(unsigned index)
 {
     return (const char *[]){"Fill Entire Window", "Retain Aspect Ratio", "Retain Integer Factor"}
         [configuration.scaling_mode];
 }
 
-const char *current_default_scale(unsigned index)
+static const char *current_default_scale(unsigned index)
 {
     return (const char *[]){"1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"}
         [configuration.default_scale - 1];
@@ -553,7 +566,7 @@ const char *current_default_scale(unsigned index)
 
 const char *current_color_correction_mode(unsigned index)
 {
-    return (const char *[]){"Disabled", "Correct Color Curves", "Emulate Hardware", "Preserve Brightness", "Reduce Contrast", "Harsh Reality"}
+    return (const char *[]){"Disabled", "Correct Color Curves", "Modern - Balanced", "Modern - Boost Contrast", "Reduce Contrast", "Harsh Reality", "Modern - Accurate"}
         [configuration.color_correction_mode];
 }
 
@@ -568,6 +581,9 @@ const char *current_color_temperature(unsigned index)
 
 const char *current_palette(unsigned index)
 {
+    if (configuration.dmg_palette == 4) {
+        return configuration.dmg_palette_name;
+    }
     return (const char *[]){"Greyscale", "Lime (Game Boy)", "Olive (Pocket)", "Teal (Light)"}
         [configuration.dmg_palette];
 }
@@ -578,7 +594,7 @@ const char *current_border_mode(unsigned index)
         [configuration.border_mode];
 }
 
-void cycle_scaling(unsigned index)
+static void cycle_scaling(unsigned index)
 {
     configuration.scaling_mode++;
     if (configuration.scaling_mode == GB_SDL_SCALING_MAX) {
@@ -588,7 +604,7 @@ void cycle_scaling(unsigned index)
     render_texture(NULL, NULL);
 }
 
-void cycle_scaling_backwards(unsigned index)
+static void cycle_scaling_backwards(unsigned index)
 {
     if (configuration.scaling_mode == 0) {
         configuration.scaling_mode = GB_SDL_SCALING_MAX - 1;
@@ -600,7 +616,7 @@ void cycle_scaling_backwards(unsigned index)
     render_texture(NULL, NULL);
 }
 
-void cycle_default_scale(unsigned index)
+static void cycle_default_scale(unsigned index)
 {
     if (configuration.default_scale == GB_SDL_DEFAULT_SCALE_MAX) {
         configuration.default_scale = 1;
@@ -613,7 +629,7 @@ void cycle_default_scale(unsigned index)
     update_viewport();
 }
 
-void cycle_default_scale_backwards(unsigned index)
+static void cycle_default_scale_backwards(unsigned index)
 {
     if (configuration.default_scale == 1) {
         configuration.default_scale = GB_SDL_DEFAULT_SCALE_MAX;
@@ -631,6 +647,12 @@ static void cycle_color_correction(unsigned index)
     if (configuration.color_correction_mode == GB_COLOR_CORRECTION_LOW_CONTRAST) {
         configuration.color_correction_mode = GB_COLOR_CORRECTION_DISABLED;
     }
+    else if (configuration.color_correction_mode == GB_COLOR_CORRECTION_MODERN_BALANCED) {
+        configuration.color_correction_mode = GB_COLOR_CORRECTION_MODERN_ACCURATE;
+    }
+    else if (configuration.color_correction_mode == GB_COLOR_CORRECTION_MODERN_ACCURATE) {
+        configuration.color_correction_mode = GB_COLOR_CORRECTION_MODERN_BOOST_CONTRAST;
+    }
     else {
         configuration.color_correction_mode++;
     }
@@ -640,6 +662,12 @@ static void cycle_color_correction_backwards(unsigned index)
 {
     if (configuration.color_correction_mode == GB_COLOR_CORRECTION_DISABLED) {
         configuration.color_correction_mode = GB_COLOR_CORRECTION_LOW_CONTRAST;
+    }
+    else if (configuration.color_correction_mode == GB_COLOR_CORRECTION_MODERN_ACCURATE) {
+        configuration.color_correction_mode = GB_COLOR_CORRECTION_MODERN_BALANCED;
+    }
+    else if (configuration.color_correction_mode == GB_COLOR_CORRECTION_MODERN_BOOST_CONTRAST) {
+        configuration.color_correction_mode = GB_COLOR_CORRECTION_MODERN_ACCURATE;
     }
     else {
         configuration.color_correction_mode--;
@@ -660,24 +688,125 @@ static void increase_color_temperature(unsigned index)
     }
 }
 
+const GB_palette_t *current_dmg_palette(void)
+{
+    typedef struct __attribute__ ((packed)) {
+        uint32_t magic;
+        uint8_t flags;
+        struct GB_color_s colors[5];
+        int32_t brightness_bias;
+        uint32_t hue_bias;
+        uint32_t hue_bias_strength;
+    } theme_t;
+    
+    static theme_t theme;
+    
+    if (configuration.dmg_palette == 4) {
+        char *path = resource_path("Palettes");
+        sprintf(path + strlen(path), "/%s.sbp", configuration.dmg_palette_name);
+        FILE *file = fopen(path, "rb");
+        if (!file) return &GB_PALETTE_GREY;
+        memset(&theme, 0, sizeof(theme));
+        fread(&theme, sizeof(theme), 1, file);
+        fclose(file);
+#ifdef GB_BIG_ENDIAN
+        theme.magic = __builtin_bswap32(theme.magic);
+#endif
+        if (theme.magic != 'SBPL') return &GB_PALETTE_GREY;
+        return (GB_palette_t *)&theme.colors;
+    }
+    
+    switch (configuration.dmg_palette) {
+        case 1:  return &GB_PALETTE_DMG;
+        case 2:  return &GB_PALETTE_MGB;
+        case 3:  return &GB_PALETTE_GBL;
+        default: return &GB_PALETTE_GREY;
+    }
+}
+
+static void update_gui_palette(void)
+{
+    const GB_palette_t *palette = current_dmg_palette();
+    
+    SDL_Color colors[4];
+    for (unsigned i = 4; i--; ) {
+        gui_palette_native[i] = SDL_MapRGB(pixel_format, palette->colors[i].r, palette->colors[i].g, palette->colors[i].b);
+        colors[i].r = palette->colors[i].r;
+        colors[i].g = palette->colors[i].g;
+        colors[i].b = palette->colors[i].b;
+    }
+    
+    SDL_Surface *background = SDL_LoadBMP(resource_path("background.bmp"));
+    
+    /* Create a blank background if background.bmp could not be loaded */
+    if (!background) {
+        background = SDL_CreateRGBSurface(0, 160, 144, 8, 0, 0, 0, 0);
+    }
+    SDL_SetPaletteColors(background->format->palette, colors, 0, 4);
+    converted_background = SDL_ConvertSurface(background, pixel_format, 0);
+    SDL_FreeSurface(background);
+}
+
 static void cycle_palette(unsigned index)
 {
     if (configuration.dmg_palette == 3) {
-        configuration.dmg_palette = 0;
+        if (n_custom_palettes == 0) {
+            configuration.dmg_palette = 0;
+        }
+        else {
+            configuration.dmg_palette = 4;
+            strcpy(configuration.dmg_palette_name, custom_palettes[0]);
+        }
+    }
+    else if (configuration.dmg_palette == 4) {
+        for (unsigned i = 0; i < n_custom_palettes; i++) {
+            if (strcmp(custom_palettes[i], configuration.dmg_palette_name) == 0) {
+                if (i == n_custom_palettes - 1) {
+                    configuration.dmg_palette = 0;
+                }
+                else {
+                    strcpy(configuration.dmg_palette_name, custom_palettes[i + 1]);
+                }
+                break;
+            }
+        }
     }
     else {
         configuration.dmg_palette++;
     }
+    configuration.gui_pallete_enabled = true;
+    update_gui_palette();
 }
 
 static void cycle_palette_backwards(unsigned index)
 {
     if (configuration.dmg_palette == 0) {
-        configuration.dmg_palette = 3;
+        if (n_custom_palettes == 0) {
+            configuration.dmg_palette = 3;
+        }
+        else {
+            configuration.dmg_palette = 4;
+            strcpy(configuration.dmg_palette_name, custom_palettes[n_custom_palettes - 1]);
+        }
+    }
+    else if (configuration.dmg_palette == 4) {
+        for (unsigned i = 0; i < n_custom_palettes; i++) {
+            if (strcmp(custom_palettes[i], configuration.dmg_palette_name) == 0) {
+                if (i == 0) {
+                    configuration.dmg_palette = 3;
+                }
+                else {
+                    strcpy(configuration.dmg_palette_name, custom_palettes[i - 1]);
+                }
+                break;
+            }
+        }
     }
     else {
         configuration.dmg_palette--;
     }
+    configuration.gui_pallete_enabled = true;
+    update_gui_palette();
 }
 
 static void cycle_border_mode(unsigned index)
@@ -847,13 +976,13 @@ static void enter_graphics_menu(unsigned index)
     recalculate_menu_height();
 }
 
-const char *highpass_filter_string(unsigned index)
+static const char *highpass_filter_string(unsigned index)
 {
     return (const char *[]){"None (Keep DC Offset)", "Accurate", "Preserve Waveform"}
         [configuration.highpass_mode];
 }
 
-void cycle_highpass_filter(unsigned index)
+static void cycle_highpass_filter(unsigned index)
 {
     configuration.highpass_mode++;
     if (configuration.highpass_mode == GB_HIGHPASS_MAX) {
@@ -861,7 +990,7 @@ void cycle_highpass_filter(unsigned index)
     }
 }
 
-void cycle_highpass_filter_backwards(unsigned index)
+static void cycle_highpass_filter_backwards(unsigned index)
 {
     if (configuration.highpass_mode == 0) {
         configuration.highpass_mode = GB_HIGHPASS_MAX - 1;
@@ -871,14 +1000,14 @@ void cycle_highpass_filter_backwards(unsigned index)
     }
 }
 
-const char *volume_string(unsigned index)
+static const char *volume_string(unsigned index)
 {
     static char ret[5];
     sprintf(ret, "%d%%", configuration.volume);
     return ret;
 }
 
-void increase_volume(unsigned index)
+static void increase_volume(unsigned index)
 {
     configuration.volume += 5;
     if (configuration.volume > 100) {
@@ -886,7 +1015,7 @@ void increase_volume(unsigned index)
     }
 }
 
-void decrease_volume(unsigned index)
+static void decrease_volume(unsigned index)
 {
     configuration.volume -= 5;
     if (configuration.volume > 100) {
@@ -894,14 +1023,14 @@ void decrease_volume(unsigned index)
     }
 }
 
-const char *interference_volume_string(unsigned index)
+static const char *interference_volume_string(unsigned index)
 {
     static char ret[5];
     sprintf(ret, "%d%%", configuration.interference_volume);
     return ret;
 }
 
-void increase_interference_volume(unsigned index)
+static void increase_interference_volume(unsigned index)
 {
     configuration.interference_volume += 5;
     if (configuration.interference_volume > 100) {
@@ -909,7 +1038,7 @@ void increase_interference_volume(unsigned index)
     }
 }
 
-void decrease_interference_volume(unsigned index)
+static void decrease_interference_volume(unsigned index)
 {
     configuration.interference_volume -= 5;
     if (configuration.interference_volume > 100) {
@@ -917,13 +1046,90 @@ void decrease_interference_volume(unsigned index)
     }
 }
 
-static const struct menu_item audio_menu[] = {
+static const char *audio_driver_string(unsigned index)
+{
+    return GB_audio_driver_name();
+}
+
+static const char *preferred_audio_driver_string(unsigned index)
+{
+    if (configuration.audio_driver[0] == 0) {
+        return "Auto";
+    }
+    return configuration.audio_driver;
+}
+
+static void audio_driver_changed(void);
+
+static void cycle_prefrered_audio_driver(unsigned index)
+{
+    audio_driver_changed();
+    if (configuration.audio_driver[0] == 0) {
+        strcpy(configuration.audio_driver, GB_audio_driver_name_at_index(0));
+        return;
+    }
+    unsigned i = 0;
+    while (true) {
+        const char *name = GB_audio_driver_name_at_index(i);
+        if (name[0] == 0) { // Not a supported driver? Switch to auto
+            configuration.audio_driver[0] = 0;
+            return;
+        }
+        if (strcmp(configuration.audio_driver, name) == 0) {
+            strcpy(configuration.audio_driver, GB_audio_driver_name_at_index(i + 1));
+            return;
+        }
+        i++;
+    }
+}
+
+static void cycle_preferred_audio_driver_backwards(unsigned index)
+{
+    audio_driver_changed();
+    if (configuration.audio_driver[0] == 0) {
+        unsigned i = 0;
+        while (true) {
+            const char *name = GB_audio_driver_name_at_index(i);
+            if (name[0] == 0) {
+                strcpy(configuration.audio_driver, GB_audio_driver_name_at_index(i - 1));
+                return;
+            }
+            i++;
+        }
+        return;
+    }
+    unsigned i = 0;
+    while (true) {
+        const char *name = GB_audio_driver_name_at_index(i);
+        if (name[0] == 0) { // Not a supported driver? Switch to auto
+            configuration.audio_driver[0] = 0;
+            return;
+        }
+        if (strcmp(configuration.audio_driver, name) == 0) {
+            strcpy(configuration.audio_driver, GB_audio_driver_name_at_index(i - 1));
+            return;
+        }
+        i++;
+    }
+}
+
+static void nop(unsigned index){}
+
+static struct menu_item audio_menu[] = {
     {"Highpass Filter:", cycle_highpass_filter, highpass_filter_string, cycle_highpass_filter_backwards},
     {"Volume:", increase_volume, volume_string, decrease_volume},
     {"Interference Volume:", increase_interference_volume, interference_volume_string, decrease_interference_volume},
+    {"Preferred Audio Driver:", cycle_prefrered_audio_driver, preferred_audio_driver_string, cycle_preferred_audio_driver_backwards},
+    {"Active Driver:", nop, audio_driver_string},
     {"Back", return_to_root_menu},
     {NULL,}
 };
+
+static void audio_driver_changed(void)
+{
+    audio_menu[4].value_getter = NULL;
+    audio_menu[4].string = "Relaunch to apply";
+}
 
 static void enter_audio_menu(unsigned index)
 {
@@ -940,7 +1146,7 @@ static void modify_key(unsigned index)
 
 static const char *key_name(unsigned index);
 
-static const struct menu_item controls_menu[] = {
+static const struct menu_item keyboard_menu[] = {
     {"Right:", modify_key, key_name,},
     {"Left:", modify_key, key_name,},
     {"Up:", modify_key, key_name,},
@@ -952,7 +1158,7 @@ static const struct menu_item controls_menu[] = {
     {"Turbo:", modify_key, key_name,},
     {"Rewind:", modify_key, key_name,},
     {"Slow-Motion:", modify_key, key_name,},
-    {"Back", return_to_root_menu},
+    {"Back", enter_controls_menu},
     {NULL,}
 };
 
@@ -964,9 +1170,9 @@ static const char *key_name(unsigned index)
     return SDL_GetScancodeName(configuration.keys[index]);
 }
 
-static void enter_controls_menu(unsigned index)
+static void enter_keyboard_menu(unsigned index)
 {
-    current_menu = controls_menu;
+    current_menu = keyboard_menu;
     current_selection = 0;
     scroll = 0;
     recalculate_menu_height();
@@ -977,7 +1183,7 @@ static SDL_Joystick *joystick = NULL;
 static SDL_GameController *controller = NULL;
 SDL_Haptic *haptic = NULL;
 
-const char *current_joypad_name(unsigned index)
+static const char *current_joypad_name(unsigned index)
 {
     static char name[23] = {0,};
     const char *orig_name = joystick? SDL_JoystickName(joystick) : NULL;
@@ -1086,17 +1292,85 @@ static void cycle_rumble_mode_backwards(unsigned index)
     }
 }
 
-const char *current_rumble_mode(unsigned index)
+static const char *current_rumble_mode(unsigned index)
 {
     return (const char *[]){"Disabled", "Rumble Game Paks Only", "All Games"}
     [configuration.rumble_mode];
 }
 
+static void toggle_allow_background_controllers(unsigned index)
+{
+    configuration.allow_background_controllers ^= true;
+    
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
+                configuration.allow_background_controllers? "1" : "0");
+}
+
+static const char *current_background_control_mode(unsigned index)
+{
+    return configuration.allow_background_controllers? "Always" : "During Window Focus Only";
+}
+
+static void cycle_hotkey(unsigned index)
+{
+    if (configuration.hotkey_actions[index - 2] == HOTKEY_MAX) {
+        configuration.hotkey_actions[index - 2] = 0;
+    }
+    else {
+        configuration.hotkey_actions[index - 2]++;
+    }
+}
+
+static void cycle_hotkey_backwards(unsigned index)
+{
+    if (configuration.hotkey_actions[index - 2] == 0) {
+        configuration.hotkey_actions[index - 2] = HOTKEY_MAX;
+    }
+    else {
+        configuration.hotkey_actions[index - 2]--;
+    }
+}
+
+static const char *current_hotkey(unsigned index)
+{
+    return (const char *[]){
+        "None",
+        "Toggle Pause",
+        "Toggle Mute",
+        "Reset", 
+        "Quit SameBoy",
+        "Save State Slot 1",
+        "Load State Slot 1",
+        "Save State Slot 2",
+        "Load State Slot 2",
+        "Save State Slot 3",
+        "Load State Slot 3",
+        "Save State Slot 4",
+        "Load State Slot 4",
+        "Save State Slot 5",
+        "Load State Slot 5",
+        "Save State Slot 6",
+        "Load State Slot 6",
+        "Save State Slot 7",
+        "Load State Slot 7",
+        "Save State Slot 8",
+        "Load State Slot 8",
+        "Save State Slot 9",
+        "Load State Slot 9",
+        "Save State Slot 10",
+        "Load State Slot 10",
+    }
+    [configuration.hotkey_actions[index - 2]];
+}
+
 static const struct menu_item joypad_menu[] = {
     {"Joypad:", cycle_joypads, current_joypad_name, cycle_joypads_backwards},
     {"Configure layout", detect_joypad_layout},
+    {"Hotkey 1 Action:", cycle_hotkey, current_hotkey, cycle_hotkey_backwards},
+    {"Hotkey 2 Action:", cycle_hotkey, current_hotkey, cycle_hotkey_backwards},
     {"Rumble Mode:", cycle_rumble_mode, current_rumble_mode, cycle_rumble_mode_backwards},
-    {"Back", return_to_root_menu},
+    {"Enable Control:", toggle_allow_background_controllers, current_background_control_mode, toggle_allow_background_controllers},
+    {"Back", enter_controls_menu},
     {NULL,}
 };
 
@@ -1153,6 +1427,32 @@ void connect_joypad(void)
     if (joystick) {
         haptic = SDL_HapticOpenFromJoystick(joystick);
     }
+}
+
+static void toggle_mouse_control(unsigned index)
+{
+    configuration.allow_mouse_controls = !configuration.allow_mouse_controls;
+}
+
+static const char *mouse_control_string(unsigned index)
+{
+    return configuration.allow_mouse_controls? "Allow mouse control" : "Disallow mouse control";
+}
+
+static const struct menu_item controls_menu[] = {
+    {"Keyboard Options", enter_keyboard_menu},
+    {"Joypad Options", enter_joypad_menu},
+    {"Motion-controlled games:", toggle_mouse_control, mouse_control_string, toggle_mouse_control},
+    {"Back", return_to_root_menu},
+    {NULL,}
+};
+
+static void enter_controls_menu(unsigned index)
+{
+    current_menu = controls_menu;
+    current_selection = 0;
+    scroll = 0;
+    recalculate_menu_height();
 }
 
 static void toggle_audio_recording(unsigned index)
@@ -1219,28 +1519,46 @@ static void toggle_audio_recording(unsigned index)
     }
 }
 
+void convert_mouse_coordinates(signed *x, signed *y)
+{
+    signed width = GB_get_screen_width(&gb);
+    signed height = GB_get_screen_height(&gb);
+    signed x_offset = (width - 160) / 2;
+    signed y_offset = (height - 144) / 2;
+
+    *x = (signed)(*x - rect.x / factor) * width / (signed)(rect.w / factor) - x_offset;
+    *y = (signed)(*y - rect.y / factor) * height / (signed)(rect.h / factor) - y_offset;
+
+    if (strcmp("CRT", configuration.filter) == 0) {
+        *y = *y * 8 / 7;
+        *y -= 144 / 16;
+    }
+}
+
 void run_gui(bool is_running)
 {
     SDL_ShowCursor(SDL_ENABLE);
     connect_joypad();
     
     /* Draw the background screen */
-    static SDL_Surface *converted_background = NULL;
     if (!converted_background) {
-        SDL_Surface *background = SDL_LoadBMP(resource_path("background.bmp"));
-        
-        /* Create a blank background if background.bmp could not be loaded */
-        if (!background) {
-            background = SDL_CreateRGBSurface(0, 160, 144, 8, 0, 0, 0, 0);
+        if (configuration.gui_pallete_enabled) {
+            update_gui_palette();
         }
-        
-        SDL_SetPaletteColors(background->format->palette, gui_palette, 0, 4);
-        converted_background = SDL_ConvertSurface(background, pixel_format, 0);
-        SDL_LockSurface(converted_background);
-        SDL_FreeSurface(background);
-        
-        for (unsigned i = 4; i--; ) {
-            gui_palette_native[i] = SDL_MapRGB(pixel_format, gui_palette[i].r, gui_palette[i].g, gui_palette[i].b);
+        else {
+            SDL_Surface *background = SDL_LoadBMP(resource_path("background.bmp"));
+            
+            /* Create a blank background if background.bmp could not be loaded */
+            if (!background) {
+                background = SDL_CreateRGBSurface(0, 160, 144, 8, 0, 0, 0, 0);
+            }
+            SDL_SetPaletteColors(background->format->palette, gui_palette, 0, 4);
+            converted_background = SDL_ConvertSurface(background, pixel_format, 0);
+            SDL_FreeSurface(background);
+    
+            for (unsigned i = 4; i--; ) {
+                gui_palette_native[i] = SDL_MapRGB(pixel_format, gui_palette[i].r, gui_palette[i].g, gui_palette[i].b);
+            }
         }
     }
 
@@ -1263,13 +1581,45 @@ void run_gui(bool is_running)
     recalculate_menu_height();
     current_selection = 0;
     scroll = 0;
+    
+    bool scrollbar_drag = false;
+    signed scroll_mouse_start = 0;
+    signed scroll_start = 0;
     while (true) {
         SDL_WaitEvent(&event);
         /* Convert Joypad and mouse events (We only generate down events) */
         if (gui_state != WAITING_FOR_KEY && gui_state != WAITING_FOR_JBUTTON) {
             switch (event.type) {
+                case SDL_KEYDOWN:
+                    if (gui_state == WAITING_FOR_KEY) break;
+                    if (event.key.keysym.mod != 0) break;
+                    switch (event.key.keysym.scancode) {
+                        // Do not remap these keys to prevent deadlocking
+                        case SDL_SCANCODE_ESCAPE:
+                        case SDL_SCANCODE_RETURN:
+                        case SDL_SCANCODE_RIGHT:
+                        case SDL_SCANCODE_LEFT:
+                        case SDL_SCANCODE_UP:
+                        case SDL_SCANCODE_DOWN:
+                            break;
+                            
+                        default:
+                                 if (event.key.keysym.scancode == configuration.keys[GB_KEY_RIGHT]) event.key.keysym.scancode = SDL_SCANCODE_RIGHT;
+                            else if (event.key.keysym.scancode == configuration.keys[GB_KEY_LEFT]) event.key.keysym.scancode = SDL_SCANCODE_LEFT;
+                            else if (event.key.keysym.scancode == configuration.keys[GB_KEY_UP]) event.key.keysym.scancode = SDL_SCANCODE_UP;
+                            else if (event.key.keysym.scancode == configuration.keys[GB_KEY_DOWN]) event.key.keysym.scancode = SDL_SCANCODE_DOWN;
+                            else if (event.key.keysym.scancode == configuration.keys[GB_KEY_A]) event.key.keysym.scancode = SDL_SCANCODE_RETURN;
+                            else if (event.key.keysym.scancode == configuration.keys[GB_KEY_START]) event.key.keysym.scancode = SDL_SCANCODE_RETURN;
+                            else if (event.key.keysym.scancode == configuration.keys[GB_KEY_B]) event.key.keysym.scancode = SDL_SCANCODE_ESCAPE;
+                            break;
+                    }
+                    break;
+
                 case SDL_WINDOWEVENT:
                     should_render = true;
+                    break;
+                case SDL_MOUSEBUTTONUP:
+                    scrollbar_drag = false;
                     break;
                 case SDL_MOUSEBUTTONDOWN:
                     if (gui_state == SHOWING_HELP) {
@@ -1281,12 +1631,25 @@ void run_gui(bool is_running)
                         event.key.keysym.scancode = SDL_SCANCODE_ESCAPE;
                     }
                     else if (gui_state == SHOWING_MENU) {
-                        signed x = (event.button.x - rect.x / factor) * width / (rect.w / factor) - x_offset;
-                        signed y = (event.button.y - rect.y / factor) * height / (rect.h / factor) - y_offset;
-                        
-                        if (strcmp("CRT", configuration.filter) == 0) {
-                            y = y * 8 / 7;
-                            y -= 144 / 16;
+                        signed x = event.button.x;
+                        signed y = event.button.y;
+                        convert_mouse_coordinates(&x, &y);
+                        if (x >= 160 - 6 && x < 160 && menu_height > 144) {
+                            unsigned scrollbar_offset = (140 - scrollbar_size) * scroll / (menu_height - 144);
+                            if (scrollbar_offset + scrollbar_size > 140) {
+                                scrollbar_offset = 140 - scrollbar_size;
+                            }
+                            
+                            if (y < scrollbar_offset || y > scrollbar_offset + scrollbar_size) {
+                                scroll = (menu_height - 144) * y / 143;
+                                should_render = true;
+                            }
+
+                            scrollbar_drag = true;
+                            mouse_scroling = true;
+                            scroll_mouse_start = y;
+                            scroll_start = scroll;
+                            break;
                         }
                         y += scroll;
                         
@@ -1429,11 +1792,20 @@ void run_gui(bool is_running)
                     return;
                 }
             }
-            case SDL_JOYBUTTONDOWN:
-            {
+            case SDL_JOYBUTTONDOWN: {
                 if (gui_state == WAITING_FOR_JBUTTON && joypad_configuration_progress != JOYPAD_BUTTONS_MAX) {
                     should_render = true;
                     configuration.joypad_configuration[joypad_configuration_progress++] = event.jbutton.button;
+                }
+                break;
+            }
+            case SDL_JOYHATMOTION: {
+                if (gui_state == WAITING_FOR_JBUTTON && joypad_configuration_progress == JOYPAD_BUTTON_RIGHT) {
+                    should_render = true;
+                    configuration.joypad_configuration[joypad_configuration_progress++] = -1;
+                    configuration.joypad_configuration[joypad_configuration_progress++] = -1;
+                    configuration.joypad_configuration[joypad_configuration_progress++] = -1;
+                    configuration.joypad_configuration[joypad_configuration_progress++] = -1;
                 }
                 break;
             }
@@ -1478,8 +1850,28 @@ void run_gui(bool is_running)
                 break;
             }
                 
+            case SDL_MOUSEMOTION: {
+                if (scrollbar_drag && scrollbar_size < 140 && scrollbar_size > 0) {
+                    signed x = event.motion.x;
+                    signed y = event.motion.y;
+                    convert_mouse_coordinates(&x, &y);
+                    signed delta = scroll_mouse_start - y;
+                    scroll = scroll_start - delta * (signed)(menu_height - 144) / (signed)(140 - scrollbar_size);
+                    if (scroll < 0) {
+                        scroll = 0;
+                    }
+                    if (scroll >= menu_height - 144) {
+                        scroll = menu_height - 144;
+                    }
+
+                    should_render = true;
+                }
+                break;
+            }
+                
 
             case SDL_KEYDOWN:
+                scrollbar_drag = false;
                 if (gui_state == WAITING_FOR_KEY) {
                     if (current_selection > 8) {
                         configuration.keys_2[current_selection - 9] = event.key.keysym.scancode;
@@ -1526,7 +1918,12 @@ void run_gui(bool is_running)
                 }
                 else if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                     if (gui_state == SHOWING_MENU && current_menu != root_menu) {
-                        return_to_root_menu(0);
+                        for (const struct menu_item *item = current_menu; item->string; item++) {
+                            if (strcmp(item->string, "Back") == 0) {
+                                item->handler(0);
+                                break;
+                            }
+                        }
                         should_render = true;
                     }
                     else if (is_running) {
@@ -1598,6 +1995,7 @@ void run_gui(bool is_running)
         if (should_render) {
             should_render = false;
             rerender:
+            SDL_LockSurface(converted_background);
             if (width == 160 && height == 144) {
                 memcpy(pixels, converted_background->pixels, sizeof(pixels));
             }
@@ -1606,6 +2004,7 @@ void run_gui(bool is_running)
                     memcpy(pixels + x_offset + width * (y + y_offset), ((uint32_t *)converted_background->pixels) + 160 * y, 160 * 4);
                 }
             }
+            SDL_UnlockSurface(converted_background);
             
             switch (gui_state) {
                 case SHOWING_DROP_MESSAGE:
@@ -1672,10 +2071,10 @@ void run_gui(bool is_running)
                         for (unsigned y = 0; y < 140; y++) {
                             uint32_t *pixel = pixels + x_offset + 156 + width * (y + y_offset + 2);
                             if (y >= scrollbar_offset && y < scrollbar_offset + scrollbar_size) {
-                                pixel[0] = pixel[1]= gui_palette_native[2];
+                                pixel[0] = pixel[1] = gui_palette_native[2];
                             }
                             else {
-                                pixel[0] = pixel[1]= gui_palette_native[1];
+                                pixel[0] = pixel[1] = gui_palette_native[1];
                             }
                             
                         }
@@ -1706,6 +2105,8 @@ void run_gui(bool is_running)
                                            "Turbo",
                                            "Rewind",
                                            "Slow-Motion",
+                                           "Hotkey 1",
+                                           "Hotkey 2",
                                            "",
                                        } [joypad_configuration_progress],
                                        gui_palette_native[3], gui_palette_native[0], DECORATION_NONE);
@@ -1720,4 +2121,32 @@ void run_gui(bool is_running)
 #endif
         }
     }
+}
+
+static void __attribute__ ((constructor)) list_custom_palettes(void)
+{
+    char *path = resource_path("Palettes");
+    if (!path) return;
+    if (strlen(path) > 1024 - 30) {
+        // path too long to safely concat filenames
+        return;
+    }
+    DIR *dir = opendir(path);
+    if (!dir) return;
+    
+    struct dirent *ent;
+    
+    while ((ent = readdir(dir))) {
+        unsigned length = strlen(ent->d_name);
+        if (length < 5 || length > 28) {
+            continue;
+        }
+        if (strcmp(ent->d_name + length - 4, ".sbp")) continue;
+        ent->d_name[length - 4] = 0;
+        custom_palettes = realloc(custom_palettes,
+                                  sizeof(custom_palettes[0]) * (n_custom_palettes + 1));
+        custom_palettes[n_custom_palettes++] = strdup(ent->d_name);
+    }
+    
+    closedir(dir);
 }

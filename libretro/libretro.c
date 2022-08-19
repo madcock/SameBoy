@@ -95,6 +95,8 @@ static bool auto_sgb_enabled[2] = {
 
 static uint32_t *frame_buf = NULL;
 static uint32_t *frame_buf_copy = NULL;
+static uint32_t retained_frame_1[256 * 224];
+static uint32_t retained_frame_2[256 * 224];
 static struct retro_log_callback logging;
 static retro_log_printf_t log_cb;
 
@@ -244,14 +246,42 @@ static void audio_callback(GB_gameboy_t *gb, GB_sample_t *sample)
     output_audio_buffer.data[output_audio_buffer.size++] = sample->right;
 }
 
-static void vblank1(GB_gameboy_t *gb)
+static void vblank1(GB_gameboy_t *gb, GB_vblank_type_t type)
 {
+    if (type == GB_VBLANK_TYPE_REPEAT) {
+        memcpy(GB_get_pixels_output(gb),
+               retained_frame_1,
+               GB_get_screen_width(gb) * GB_get_screen_height(gb) * sizeof(uint32_t));
+    }
     vblank1_occurred = true;
 }
 
-static void vblank2(GB_gameboy_t *gb)
+static void vblank2(GB_gameboy_t *gb, GB_vblank_type_t type)
 {
+    if (type == GB_VBLANK_TYPE_REPEAT) {
+        memcpy(GB_get_pixels_output(gb),
+               retained_frame_2,
+               GB_get_screen_width(gb) * GB_get_screen_height(gb) * sizeof(uint32_t));
+    }
     vblank2_occurred = true;
+}
+
+static void lcd_status_change_1(GB_gameboy_t *gb, bool on)
+{
+    if (!on) {
+        memcpy(retained_frame_1,
+               GB_get_pixels_output(gb),
+               GB_get_screen_width(gb) * GB_get_screen_height(gb) * sizeof(uint32_t));
+    }
+}
+
+static void lcd_status_change_2(GB_gameboy_t *gb, bool on)
+{
+    if (!on) {
+        memcpy(retained_frame_2,
+               GB_get_pixels_output(gb),
+               GB_get_screen_width(gb) * GB_get_screen_height(gb) * sizeof(uint32_t));
+    }
 }
 
 static bool bit_to_send1 = true, bit_to_send2 = true;
@@ -338,7 +368,7 @@ static void set_variable_visibility(void)
             option_display_singlecart.key = key;
             environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display_singlecart);
         }
-        else if ((strcmp(key, "sameboy_link")               == 0) ||
+        else if ((strcmp(key, "sameboy_link")                    == 0) ||
                  (strcmp(key, "sameboy_screen_layout")           == 0) ||
                  (strcmp(key, "sameboy_audio_output")            == 0) ||
                  (strcmp(key, "sameboy_model_1")                 == 0) ||
@@ -656,8 +686,10 @@ static void init_for_current_model(unsigned id)
 
     /* todo: attempt to make these more generic */
     GB_set_vblank_callback(&gameboy[0], (GB_vblank_callback_t) vblank1);
+    GB_set_lcd_status_callback(&gameboy[0], lcd_status_change_1);
     if (emulated_devices == 2) {
         GB_set_vblank_callback(&gameboy[1], (GB_vblank_callback_t) vblank2);
+        GB_set_lcd_status_callback(&gameboy[2], lcd_status_change_2);
         if (link_cable_emulation) {
             set_link_cable_state(true);
         }
@@ -797,16 +829,19 @@ static void check_variables()
                 GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_CORRECT_CURVES);
             }
             else if (strcmp(var.value, "emulate hardware") == 0) {
-                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_EMULATE_HARDWARE);
+                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_MODERN_BALANCED);
             }
             else if (strcmp(var.value, "preserve brightness") == 0) {
-                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_PRESERVE_BRIGHTNESS);
+                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_MODERN_BOOST_CONTRAST);
             }
             else if (strcmp(var.value, "reduce contrast") == 0) {
                 GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_REDUCE_CONTRAST);
             }
             else if (strcmp(var.value, "harsh reality") == 0) {
                 GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_LOW_CONTRAST);
+            }
+            else if (strcmp(var.value, "accurate") == 0) {
+                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_MODERN_ACCURATE);
             }
         }
 
@@ -1078,16 +1113,19 @@ static void check_variables()
                 GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_CORRECT_CURVES);
             }
             else if (strcmp(var.value, "emulate hardware") == 0) {
-                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_EMULATE_HARDWARE);
+                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_MODERN_BALANCED);
             }
             else if (strcmp(var.value, "preserve brightness") == 0) {
-                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_PRESERVE_BRIGHTNESS);
+                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_MODERN_BOOST_CONTRAST);
             }
             else if (strcmp(var.value, "reduce contrast") == 0) {
                 GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_REDUCE_CONTRAST);
             }
             else if (strcmp(var.value, "harsh reality") == 0) {
                 GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_LOW_CONTRAST);
+            }
+            else if (strcmp(var.value, "accurate") == 0) {
+                GB_set_color_correction_mode(&gameboy[0], GB_COLOR_CORRECTION_MODERN_ACCURATE);
             }
         }
 
@@ -1101,16 +1139,19 @@ static void check_variables()
                 GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_CORRECT_CURVES);
             }
             else if (strcmp(var.value, "emulate hardware") == 0) {
-                GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_EMULATE_HARDWARE);
+                GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_MODERN_BALANCED);
             }
             else if (strcmp(var.value, "preserve brightness") == 0) {
-                GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_PRESERVE_BRIGHTNESS);
+                GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_MODERN_BOOST_CONTRAST);
             }
             else if (strcmp(var.value, "reduce contrast") == 0) {
                 GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_REDUCE_CONTRAST);
             }
             else if (strcmp(var.value, "harsh reality") == 0) {
                 GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_LOW_CONTRAST);
+            }
+            else if (strcmp(var.value, "accurate") == 0) {
+                GB_set_color_correction_mode(&gameboy[1], GB_COLOR_CORRECTION_MODERN_ACCURATE);
             }
         }
 
@@ -1813,4 +1854,3 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
     (void)enabled;
     (void)code;
 }
-
