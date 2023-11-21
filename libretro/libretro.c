@@ -1262,6 +1262,13 @@ void retro_init(void)
     }
 
     init_output_audio_buffer(16384);
+
+#if defined(SF2000)
+    enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
+    if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
+        log_cb(RETRO_LOG_ERROR, "XRGB8888 is not supported\n");
+    }
+#endif
 }
 
 void retro_deinit(void)
@@ -1532,11 +1539,13 @@ bool retro_load_game(const struct retro_game_info *info)
     frame_buf = (uint32_t *)malloc(MAX_VIDEO_PIXELS * emulated_devices * sizeof(uint32_t));
     memset(frame_buf, 0, MAX_VIDEO_PIXELS * emulated_devices * sizeof(uint32_t));
 
+#if !defined(SF2000)
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
         log_cb(RETRO_LOG_ERROR, "XRGB8888 is not supported\n");
         return false;
     }
+#endif
 
     for (int i = 0; i < emulated_devices; i++) {
         init_for_current_model(i);
